@@ -534,6 +534,9 @@ jobs:
             : inputs.model_profile == 'gpt-oss-20b'      ? 'openai/gpt-oss-20b'
             : inputs.model_profile == 'gpt-oss-120b'     ? 'openai/gpt-oss-120b'
             : '' }}
+        optional: true
+        hidden: ${{ inputs.model_source != 'huggingface' }}
+        ignore: ${{ inputs.model_source != 'huggingface' }}
         tooltip: >
           Auto-filled from the profile. For "Custom", paste any HF causal-LM
           ID. Ignored when Model Source is "Local path" below.
