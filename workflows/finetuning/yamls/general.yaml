@@ -11,8 +11,10 @@
 # TensorBoard is reachable at the endpoint's port only while training runs
 # (app/start-template.sh); a persistent offline report (loss/eval-loss plots +
 # metrics.json + report.html) is written under output_dir/report once training
-# completes, and the run then completes on its own -- no endpoint left running
-# to remember to tear down.
+# completes. The service script's cleanup trap (below) then explicitly runs
+# `pw endpoints delete` on its own endpoint name -- relying on process death
+# alone to deregister it was found to leave a stale entry in
+# `pw endpoints list` after a normal, successful completion.
 #
 # TESTING: checkout branch below points at add-finetuning while iterating.
 # Flip to canary before merging to canary.
@@ -115,7 +117,8 @@ jobs:
           optim="${{ inputs.advanced.optim }}"
           gradient_checkpointing="${{ inputs.advanced.gradient_checkpointing }}"
           bf16="${{ inputs.advanced.bf16 }}"
-          pw_endpoints_args="--name ${{ inputs.service.name }}-${PW_RUN_SLUG}"
+          endpoint_name="${{ inputs.service.name }}-${PW_RUN_SLUG}"
+          pw_endpoints_args="--name ${endpoint_name}"
           EOF
           echo "base_model_id=\"${resolved_base_model_id}\"" >> inputs.sh
           sed -i '/=\s*$\|=undefined\s*$/d' inputs.sh
@@ -149,6 +152,13 @@ jobs:
                   echo "echo Cleanup script was already executed" > cancel.sh
                   bash cancel.sh.submitted
               fi
+              # Belt-and-suspenders: a process death should deregister its own
+              # `pw endpoints run` entry, but this workflow has been observed
+              # leaving a stale entry in `pw endpoints list` after training
+              # completes normally. Explicitly delete it here so every exit
+              # path (normal completion, error, cancel, signal) actually tears
+              # the endpoint down, not just the local process tree.
+              pw endpoints delete "${endpoint_name}" 2>/dev/null || true
               kill -- -$$
           }
 
