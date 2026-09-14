@@ -39,6 +39,8 @@ workflows/<name>/            # README + build tooling (defs, build-container.sh)
 workflows/<name>/thumbnails/ # marketplace thumbnails (one per registered variant look)
 workflows/script_submitter/v3.6/  # shared subworkflow: SLURM/PBS/SSH script submission
 tools/oras, tools/utils      # shared runtime tools, referenced as tools/... from run dirs
+workflows/<name>/tests/<variant>/  # end-to-end tests: <test>.json form inputs + <test>.csv results
+tools/tests/                 # the test runner (run-workflow-test.py) and its README
 tutorials/                   # staged, runnable lessons on the workflow system
 docs/                        # developer + AI docs
 .claude/skills/activate-workflows/  # Claude Code skill for building workflows here
@@ -114,6 +116,11 @@ those platforms — validate them statically.
 
 ## Testing and debugging
 
+- **Test every new or changed workflow end-to-end at least once and record the test in
+  the repo.** Tests live under `workflows/<name>/tests/<variant>/` and run with
+  `python3 tools/tests/run-workflow-test.py <test.json>`. The layout, keys, pass
+  criteria and result columns are documented once, in `tools/tests/README.md`. Commit
+  the test and the rows the runner appends with the change; never edit a CSV by hand.
 - **Push before testing** anything the run fetches (`app/` scripts, subworkflows):
   checkout and `uses:` steps pull this repo from GitHub at run time. The YAML itself
   is read from the absolute path you pass, so a YAML-only edit tests without a push.

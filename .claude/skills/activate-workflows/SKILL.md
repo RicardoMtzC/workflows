@@ -152,36 +152,33 @@ query string.
 
 Numbers from `integer` inputs arrive as **strings**; guard with `${var:-default}`.
 
-## Step 3 — Test end-to-end with the `pw` client
+## Step 3 — Test end-to-end and record the test
+
+Every workflow is tested end-to-end at least once, and any end-to-end test is recorded
+under `workflows/<name>/tests/<variant>/`. The test layout, the `_test` keys, the pass
+criteria and the result columns are documented once, in `tools/tests/README.md`; read
+it before writing a test. Start from an existing test, e.g.
+`workflows/webshell/tests/<variant>/<test-name>.json`.
 
 **Push first, unless only the YAML changed.** The YAML's checkout and `uses:` steps
 fetch the repo from GitHub at run time, so a local edit to anything they fetch (`app/`
 scripts, the subworkflow) is invisible until it is on the referenced branch. The YAML
-itself is read from the absolute path you pass, so a YAML-only edit tests without a
-push (verified 2026-09-10 with the ollama endpoint-name change).
+itself is read from the local path, so a YAML-only edit tests without a push.
 
 ```bash
-# always validate first — catches YAML/schema/variant errors without executing
-pw workflows run --dry-run -i '{"cluster":{"resource":"<name>","scheduler":false}}' /abs/path/general.yaml
-
-# run a repo YAML directly (ABSOLUTE path — a relative path is parsed as a git host)
-pw workflows run /abs/path/workflows/<name>/yamls/general.yaml \
-    -i '{"cluster":{"resource":"<name>","scheduler":false}}' -o json   # note run.slug
+python3 tools/tests/run-workflow-test.py workflows/<name>/tests/<variant>/<test>.json
 ```
 
-- **Pass the resource as a bare name string** (`"gcpsmall"`, `"workspace"`); the
-  platform resolves the full object. Never hardcode IPs.
-- Pick an **active** resource (`pw cluster ls`). `scheduler:false` runs the service
-  on the login node — simplest for a demo.
-- Watch progress: `pw workflows runs logs <slug>` or poll
-  `pw workflows runs view <slug> -o json`.
-- **Success = the endpoint is online and serving:** `pw endpoints list` shows
-  `<service.name>-<run-slug>` with its URL; `curl` it (expect 200, or the platform
-  auth redirect for `--openai` endpoints). The run itself completes once
-  `wait_for_endpoint` sees it — the service keeps running.
-- **Tear down when done:** `pw endpoints delete <name>` kills the whole remote
-  process tree; verify with `ps -x | grep <service>`. Beware daemonizing apps that
-  re-parent to PID 1 (e.g. RStudio's `rsession`) — they can survive the tree kill.
+Pass = `result=pass` and `cleanup=ok` in the row the runner appends. On failure read
+`tests/<variant>/logs/<slug>.txt` and `pw workflows runs errors <slug>`, fix, push,
+re-run. Commit the test files and CSV rows with the change; never edit a CSV by hand.
+
+Facts that still matter when running by hand (`pw workflows run /abs/path.yaml -i inputs.json`):
+- Pass the resource as its URI (`pw://alvaro/gcpsmall`) or bare name; never an IP.
+  It must be `active` in `pw cluster ls`.
+- The run completes once `wait_for_endpoint` sees the endpoint; the service keeps
+  running until `pw endpoints delete <name>`, which kills the remote process tree.
+  Daemonizing apps that re-parent to PID 1 (e.g. RStudio's `rsession`) can survive it.
 - **Verify cleanup on CANCEL — a required test, not an afterthought:** cancel one run
   mid-flight (`pw workflows runs cancel <slug>` while the service is starting or
   serving) and confirm `cancel.sh` actually ran: no service processes (`ps -x`), no

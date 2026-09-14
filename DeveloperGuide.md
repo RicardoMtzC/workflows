@@ -116,24 +116,28 @@ matching variant of a similar workflow (they pass their variant's
 
 ## 5. Testing
 
-Push first — the YAML pulls this repo from GitHub at run time, so local edits are
-invisible until they are on the referenced branch. Then, with the **absolute** YAML
-path (a relative path is parsed as a git host):
+Every workflow is tested end-to-end at least once, and any end-to-end test is recorded
+under `workflows/my-session/tests/<variant>/`. The test layout, the test file keys, the
+pass criteria and the result columns are documented once, in
+[`tools/tests/README.md`](tools/tests/README.md). Start from an existing test, e.g.
+`workflows/webshell/tests/<variant>/<test-name>.json`.
+
+Push first — the YAML pulls this repo from GitHub at run time, so local edits to
+`app/` are invisible until they are on the referenced branch. Then:
 
 ```bash
-pw workflows run /abs/path/workflows/my-session/yamls/general.yaml \
-    -i '{"cluster":{"resource":"<cluster>","scheduler":false}}'
-pw endpoints list                       # pass = my-session-<run-slug> online, URL serves
-pw endpoints delete my-session-<slug>   # tear down; confirm with ps -x
+python3 tools/tests/run-workflow-test.py workflows/my-session/tests/<variant>/<test-name>.json
 ```
+
+Commit the test and the rows the runner appends to its CSV with your change; never
+edit a CSV by hand.
 
 **Verify cleanup on cancel — part of testing, every time.** Cancel a run mid-flight
 (`pw workflows runs cancel <slug>` while the service is starting or serving) and
 confirm the cleanup actually ran: no service processes left (`ps -x`), no scheduler
 job (`squeue`/`qstat` when `scheduler:true`), no container instances
-(`singularity instance list`, `docker ps`), no stray listeners. Then do the same
-check after `pw endpoints delete` on a successful run — apps that daemonize and
-re-parent to PID 1 (e.g. RStudio's `rsession`) can survive the tree kill and need
+(`singularity instance list`, `docker ps`), no stray listeners. Apps that daemonize
+and re-parent to PID 1 (e.g. RStudio's `rsession`) can survive the tree kill and need
 handling in `cancel.sh`. Write `cancel.sh` at the very top of the start script so a
 cancel at any moment finds it.
 
