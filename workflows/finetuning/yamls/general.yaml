@@ -78,6 +78,20 @@ jobs:
           fi
           env | grep '^PW_' | grep -v 'PW_API_KEY' > inputs.sh
           sed -i 's/=\(.*\)/="\1"/' inputs.sh
+          # The HF token is the one secret on this form. Keep it out of
+          # inputs.sh and its two copies (controller-*.sh, start-service-*.sh),
+          # which persist in the job dir and are rendered verbatim into
+          # logs/<job>/step_N/script-unstable.sh -- and out of xtrace. It goes
+          # to a single 0600 sidecar that the scripts read at run time and
+          # cleanup() shreds. Same reasoning as the PW_API_KEY strip above.
+          if [ -z "${PW_PARENT_JOB_DIR:-}" ]; then
+              echo "::error title=Error::PW_PARENT_JOB_DIR is unset; refusing to write the token sidecar to an unexpected path"
+              exit 1
+          fi
+          set +x
+          ( umask 077; printf '%s' "${{ inputs.hf_token }}" > "${PW_PARENT_JOB_DIR}/.hf_token" )
+          chmod 600 "${PW_PARENT_JOB_DIR}/.hf_token"
+          set -x
           cat <<'EOF' >> inputs.sh
           PATH=$HOME/pw:$PATH
           service_parent_install_dir="${{ inputs.service.parent_install_dir }}"
@@ -87,7 +101,7 @@ jobs:
           container_requirements_file="${{ inputs.container.requirements_file }}"
           model_profile="${{ inputs.model_profile }}"
           model_source="${{ inputs.model_source }}"
-          hf_token="${{ inputs.hf_token }}"
+          hf_token_file="${PW_PARENT_JOB_DIR}/.hf_token"
           model_cache_dir="${{ inputs.model_cache_dir }}"
           local_dataset_path="${{ inputs.dataset_config.local_dataset_path }}"
           dataset_format="${{ inputs.dataset_config.dataset_format }}"
@@ -104,7 +118,6 @@ jobs:
           quantization="${{ inputs.lora.quantization }}"
           eval_steps="${{ inputs.evaluation.eval_steps }}"
           quality_eval_type="${{ inputs.evaluation.quality_eval_type }}"
-          quality_eval_command="${{ inputs.evaluation.quality_eval_command }}"
           tensorboard_enabled="${{ inputs.tensorboard_enabled }}"
           output_dir="${{ inputs.output_dir }}"
           merge_full_weights="${{ inputs.merge_full_weights }}"
@@ -132,16 +145,19 @@ jobs:
           # corrupting the value (found 2026-09-10, first real pw run:
           # response_template silently became "### Response:\nexport ").
           sed -i -E 's/^([A-Za-z_][A-Za-z0-9_]*=)/export \1/' inputs.sh
+          chmod 600 inputs.sh
       - name: Controller Preprocessing
         run: |
           set -x
           cp inputs.sh controller-${PW_JOB_ID}.sh
+          chmod 600 controller-${PW_JOB_ID}.sh
           cat workflows/finetuning/app/controller.sh >> controller-${PW_JOB_ID}.sh
           bash controller-${PW_JOB_ID}.sh
       - name: Create Service Script
         run: |
           rm -f HOSTNAME SESSION_PORT job.ended job.started
           cp inputs.sh start-service-${PW_JOB_ID}.sh
+          chmod 600 start-service-${PW_JOB_ID}.sh
           cat <<'EOF' >> start-service-${PW_JOB_ID}.sh
 
           cleanup() {
@@ -159,6 +175,9 @@ jobs:
               # path (normal completion, error, cancel, signal) actually tears
               # the endpoint down, not just the local process tree.
               pw endpoints delete "${endpoint_name}" 2>/dev/null || true
+              if [ -n "${hf_token_file:-}" ] && [ -f "${hf_token_file}" ]; then
+                  shred -u "${hf_token_file}" 2>/dev/null || rm -f "${hf_token_file}"
+              fi
               kill -- -$$
           }
 
@@ -704,13 +723,6 @@ jobs:
               - { value: overlap, label: "Reference overlap (ROUGE/BLEU)" }
               - { value: task,    label: "Task metric (exact-match / accuracy)" }
               - { value: judge,   label: "LLM-as-judge (rubric)" }
-          quality_eval_command:
-            label: Quality Eval Command / Endpoint
-            type: string
-            default: ""
-            optional: true
-            hidden: ${{ inputs.evaluation.quality_eval_type == 'none' }}
-            ignore: ${{ inputs.evaluation.quality_eval_type == 'none' }}
 
       # ----------------------------------------------------------------------
       # 7. DASHBOARD

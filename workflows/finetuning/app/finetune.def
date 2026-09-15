@@ -27,14 +27,42 @@ From: nvidia/cuda:12.4.1-devel-ubuntu22.04
         python3 python3-pip python3-dev git git-lfs ca-certificates
     rm -rf /var/lib/apt/lists/*
     python3 -m pip install --no-cache-dir --upgrade pip
-    python3 -m pip install --no-cache-dir -r /opt/finetune/requirements.txt
+
+    # Two installs, each with a SINGLE --index-url, instead of one install with
+    # --extra-index-url. --extra-index-url makes pip merge PyPI and the cu128
+    # index and take the highest version found across BOTH, so a package
+    # published to PyPI under a name the cu128 index also serves can win the
+    # resolution. Scoping each install to one index removes that merge.
+    #
+    # The torch pin is read back out of requirements.txt rather than repeated
+    # here: build-container.sh stages either requirements.txt or
+    # requirements-tf5.txt at this path, and the pin set stays the single
+    # source of truth for what version is installed.
+    torch_pin=$(grep -E '^torch==' /opt/finetune/requirements.txt || true)
+    if [ -z "${torch_pin}" ]; then
+        echo "no 'torch==' pin found in /opt/finetune/requirements.txt" >&2
+        exit 1
+    fi
+    python3 -m pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu128 "${torch_pin}"
+    python3 -m pip install --no-cache-dir \
+        --index-url https://pypi.org/simple -r /opt/finetune/requirements.txt
+
     # Fragile piece (HANDOFF sec3.5): install explicitly, separately from the
     # pinned requirements.txt, so a version bump here stays easy to spot.
-    python3 -m pip install --no-cache-dir triton-kernels==0.1.0
+    python3 -m pip install --no-cache-dir \
+        --index-url https://pypi.org/simple triton-kernels==0.1.0
 
 %test
     python3 -c "import torch, transformers, peft, trl, accelerate; print('deps ok')"
     python3 -c "import torch; print('cuda available (build host, expected False unless GPU-visible):', torch.cuda.is_available())"
+    # Egress guard, not a dependency check. transformers' Trainer defaults to
+    # report_to="all", which auto-enables ANY tracker SDK it can import and
+    # ships loss curves and hyperparameters to that vendor's service with no
+    # code change. app/train.py sets report_to explicitly, but keeping the
+    # image free of these means a future code path cannot opt in by accident.
+    # Fail the BUILD if one is ever pulled in as a transitive dependency.
+    python3 -c "import importlib.util as u; bad = [m for m in ('wandb', 'mlflow', 'comet_ml', 'clearml', 'neptune', 'dvclive', 'codecarbon', 'sentry_sdk', 'posthog') if u.find_spec(m) is not None]; assert not bad, 'telemetry/tracker SDK present in image: %s' % bad; print('no tracker SDKs: ok')"
 
 %labels
     org.opencontainers.image.source https://github.com/parallelworks/workflows

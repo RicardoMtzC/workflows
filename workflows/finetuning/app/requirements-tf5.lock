@@ -8,9 +8,12 @@
 # future rebuild can be diffed against a known-good stack when behavior changes.
 #
 # Two caveats if you ever install from it directly:
-#   - torch is pinned with its +cu128 local version, so the
-#     --extra-index-url https://download.pytorch.org/whl/cu128 from requirements-tf5.txt
-#     is still required; pip freeze does not emit index URLs.
+#   - torch is pinned with its +cu128 local version and must come from
+#     https://download.pytorch.org/whl/cu128; pip freeze does not emit index URLs.
+#     requirements-tf5.txt no longer carries --extra-index-url (dependency
+#     confusion) -- finetune.def installs torch from that index in a scoped
+#     `pip install --index-url`, so a manual install from this file needs the
+#     same two-step treatment.
 #   - triton-kernels is installed by finetune.def's %post, not by requirements-tf5.txt,
 #     but it is captured below because it is present in the image.
 #

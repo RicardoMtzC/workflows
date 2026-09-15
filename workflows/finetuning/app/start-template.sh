@@ -123,11 +123,16 @@ set -x
 PORT="\${1}"
 
 # Real TensorBoard backend, fixed internal port -- never exposed directly.
+# --host 127.0.0.1, NOT --bind_all: --bind_all listens on 0.0.0.0 with no
+# authentication, which hands the whole logdir (loss curves, eval metrics,
+# hyperparameters) to anyone who can reach this node on 6007, bypassing the
+# endpoint's auth entirely. tb_proxy.py connects over localhost, so the
+# endpoint path is unaffected.
 singularity exec --writable-tmpfs \\
     --bind "${output_dir_resolved}:${output_dir_resolved}" \\
     --bind "${PWD}/container_tmp:/tmp" \\
     "${container_ref}" \\
-    tensorboard --logdir "${output_dir_resolved}" --port 6007 --bind_all \\
+    tensorboard --logdir "${output_dir_resolved}" --port 6007 --host 127.0.0.1 \\
     > "${PWD}/tb.log" 2>&1 &
 echo \$! > "${PWD}/tb.pid"
 
@@ -167,7 +172,13 @@ export EVAL_SPLIT="${eval_split_fraction}"
 export EVAL_STEPS="${eval_steps}"
 export MERGE_FULL_WEIGHTS="${merge_full_weights}"
 export TENSORBOARD_ENABLED="${tensorboard_enabled}"
-export HF_TOKEN="${hf_token:-}"
+# Read from the 0600 sidecar at launch time with xtrace off, rather than
+# interpolated here: this heredoc becomes launch-service.sh, a plaintext file
+# that persists in the job dir, and `set -x` above would otherwise trace the
+# token into the run log the platform collects.
+set +x
+export HF_TOKEN="\$(cat "${hf_token_file:-/dev/null}" 2>/dev/null || true)"
+set -x
 export OPTIM="${optim:-}"
 export GRADIENT_CHECKPOINTING="${gradient_checkpointing:-false}"
 export BF16="${bf16:-false}"
@@ -196,7 +207,7 @@ kill "\$(cat "${PWD}/tbproxy.pid")" 2>/dev/null || true
 
 exit \${train_rc}
 LAUNCHEOF
-chmod +x launch-service.sh
+chmod 700 launch-service.sh
 
 echo "::endgroup::"
 echo "::group::Starting Finetuning Service"

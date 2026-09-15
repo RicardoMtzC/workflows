@@ -27,6 +27,18 @@ import urllib.error
 BACKEND = int(os.environ.get("TB_BACKEND_PORT", 6007))
 BASE_PATH = os.environ.get("SESSION_BASE_PATH", "")
 
+# host/connection are hop-by-hop. The credential headers are dropped because
+# they belong to the ACTIVATE proxy's session with THIS endpoint -- TensorBoard
+# never consumes them, so replaying them to the backend only widens where the
+# caller's credentials travel.
+DROP_REQUEST_HEADERS = (
+    "host",
+    "connection",
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+)
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -44,7 +56,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         req = urllib.request.Request(url, data=body, method=self.command)
         for key, val in self.headers.items():
-            if key.lower() not in ("host", "connection"):
+            if key.lower() not in DROP_REQUEST_HEADERS:
                 req.add_header(key, val)
 
         try:

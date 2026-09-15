@@ -121,8 +121,9 @@ def parse_args() -> argparse.Namespace:
                          help="Blank = profile default (see PROFILE_QUANTIZATION_DEFAULT). "
                               "'native' loads via Mxfp4Config(dequantize=True) -- gpt-oss profiles only.")
     parser.add_argument("--hf-token", default=None)
-    parser.add_argument("--push-to-hub", action="store_true")
-    parser.add_argument("--hub-model-id", default=None)
+    # No --push-to-hub / --hub-model-id on purpose: this workflow never
+    # uploads trained weights off the node. app/train-entrypoint.sh also
+    # unsets the PUSH_TO_HUB / HUB_MODEL_ID env vars that used to set them.
     parser.add_argument("--merge-full-weights", action="store_true")
     parser.add_argument("--merged-save-format", choices=["safetensors", "bin"], default="safetensors")
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -161,10 +162,20 @@ def maybe_login(token: Optional[str]) -> None:
     """
     if not token:
         return
+    # train-entrypoint.sh sets HF_HUB_OFFLINE=1: the model directory and the
+    # dataset are both local by this point, so there is nothing to
+    # authenticate against -- and login() would try to validate the token
+    # against the Hub and fail the run.
+    if os.environ.get("HF_HUB_OFFLINE") == "1":
+        LOG.info("HF_HUB_OFFLINE=1; skipping Hub login.")
+        return
     local_rank = os.environ.get("LOCAL_RANK")
     if local_rank not in (None, "0"):
         return
-    login(token=token, add_to_git_credential=True)
+    # add_to_git_credential=False: login() is wanted only for the in-process
+    # credential store. The git credential helper is written to $HOME and
+    # outlives the job, leaving the token on the node after the run ends.
+    login(token=token, add_to_git_credential=False)
     LOG.info("Logged in to Hugging Face Hub.")
 
 
@@ -747,11 +758,6 @@ def train(args: argparse.Namespace) -> Path:
         LOG.info("Saved LoRA adapters to %s", adapter_dir)
 
         write_report(output_dir, args, trainer, started_at)
-
-        if args.push_to_hub:
-            hub_target = args.hub_model_id or f"{Path(args.base_model_id).name}-finetuned"
-            peft_model.push_to_hub(hub_target)
-            tokenizer.push_to_hub(hub_target)
 
     if args.merge_full_weights and trainer.is_world_process_zero():
         merged_dir = output_dir / "merged"

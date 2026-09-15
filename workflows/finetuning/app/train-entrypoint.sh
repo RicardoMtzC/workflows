@@ -17,6 +17,24 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 : "${STRATEGY:=single}"
 : "${NUM_GPUS:=1}"
 
+# --- Egress hardening -------------------------------------------------------
+# BASE_MODEL_ID is a local directory by the time this runs (start-template.sh
+# verifies config.json before launching) and DATASET_SOURCE is pinned to
+# `local`, so training needs no outbound network at all. Enforce that here
+# rather than trusting it: an accidental Hub dependency now fails loudly at
+# this boundary instead of silently reaching out, and no usage telemetry or
+# implicitly-attached token leaves the node.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+
+# Uploading trained weights is not a capability this workflow offers. These
+# two were read from the AMBIENT environment, so a site profile or the
+# submitting user's shell could switch on a push to the public Hub with
+# nothing about it appearing in the run form.
+unset PUSH_TO_HUB HUB_MODEL_ID
+
 # STRATEGY/NUM_GPUS come from resolve_strategy's job outputs (yamls/general.yaml).
 # single stays plain python3 (unchanged); ddp/fsdp launch one process per GPU
 # via accelerate -- train.py itself branches its device placement on
@@ -104,9 +122,10 @@ if [[ "${TRUST_REMOTE_CODE:-false}" == "true" ]]; then CMD+=(--trust-remote-code
 if [[ "${MERGE_FULL_WEIGHTS:-false}" == "true" ]]; then
     CMD+=(--merge-full-weights --merged-save-format "${MERGED_SAVE_FORMAT:-safetensors}")
 fi
-if [[ -n "${HUB_MODEL_ID:-}" ]]; then CMD+=(--hub-model-id "${HUB_MODEL_ID}"); fi
-if [[ "${PUSH_TO_HUB:-false}" == "true" ]]; then CMD+=(--push-to-hub); fi
-if [[ -n "${HF_TOKEN:-}" ]]; then export HF_TOKEN; CMD+=(--hf-token "${HF_TOKEN}"); fi
+# Exported, never appended to CMD: an argv element is visible to every other
+# user on the node via `ps`, and lands in the traced command line below (which
+# the platform collects). train.py falls back to os.environ["HF_TOKEN"].
+if [[ -n "${HF_TOKEN:-}" ]]; then export HF_TOKEN; fi
 if [[ "${TENSORBOARD_ENABLED:-false}" == "true" ]]; then CMD+=(--tensorboard); fi
 if [[ -n "${EVAL_SPLIT:-}" ]]; then CMD+=(--eval-split-fraction "${EVAL_SPLIT}"); fi
 if [[ -n "${EVAL_STEPS:-}" ]]; then CMD+=(--eval-steps "${EVAL_STEPS}"); fi
@@ -135,6 +154,9 @@ mkdir -p "${OUTPUT_DIR}"
 MEM_MON_PID=$!
 trap 'kill "${MEM_MON_PID}" 2>/dev/null || true' EXIT
 
-echo "::notice::Running: ${CMD[*]}"
+# Redacted defensively: no element of CMD carries the token any more, but this
+# line is collected into the platform job log, so it must stay safe if one is
+# ever added back.
+echo "::notice::Running: ${CMD[*]//${HF_TOKEN:-__no_token_set__}/***}"
 echo "::notice::System-RAM monitor PID ${MEM_MON_PID} logging to ${MEM_LOG} every ${MEM_MON_INTERVAL}s"
 "${CMD[@]}"

@@ -24,7 +24,12 @@
 #   - MoE forward uses >2x the memory of 4.x (OLMoE 4-bit: 6.35 -> >14.3 GiB).
 #     Do not use this image for MoE profiles.
 # Dense-path memory is unchanged (10.43 GiB on both).
---extra-index-url https://download.pytorch.org/whl/cu128
+#
+# No --extra-index-url here on purpose: it makes pip merge PyPI and the cu128
+# index and resolve to the highest version across both, which is the
+# dependency-confusion footgun. finetune.def installs the torch pin below from
+# https://download.pytorch.org/whl/cu128 in its own scoped `pip install
+# --index-url`, then installs this file from PyPI alone.
 torch==2.8.0
 transformers==5.16.1
 trl==0.23.0
