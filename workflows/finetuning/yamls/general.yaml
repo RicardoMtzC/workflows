@@ -76,6 +76,26 @@ jobs:
                   exit 1
               fi
           fi
+          # lora.quantization is resolved here, in bash, for exactly the reason
+          # base_model_id is (see above). Its former chained-ternary default
+          # mis-evaluated: for model_profile=gpt-oss-20b the first (parenthesized,
+          # ||) branch is true and should yield 'native', but the engine emitted
+          # the RAW SOURCE TEXT of a different branch -- "'4bit'\n", quotes and
+          # newline intact. The newline then split the assignment across two
+          # physical lines in inputs.sh and train.py died in argparse
+          # ("invalid choice: \"'4bit'\\n\"") before loading a single weight.
+          # Found 2026-09-15, run precise-ewe. Both gpt-oss profiles and
+          # gemma-4-31b were affected; olmo/olmoe only escaped because their
+          # correct answer coincided with the final fallback branch.
+          #
+          # 'auto' means "let train.py decide": an empty quantization makes
+          # train-entrypoint.sh omit --quantization, and train.py's
+          # resolve_quantization() applies PROFILE_QUANTIZATION_DEFAULT -- the
+          # single source of truth the ternary was duplicating.
+          resolved_quantization="${{ inputs.lora.quantization }}"
+          if [ "${resolved_quantization}" = "auto" ]; then
+              resolved_quantization=""
+          fi
           env | grep '^PW_' | grep -v 'PW_API_KEY' > inputs.sh
           sed -i 's/=\(.*\)/="\1"/' inputs.sh
           # The HF token is the one secret on this form. Keep it out of
@@ -121,7 +141,6 @@ jobs:
           lora_r="${{ inputs.lora.lora_r }}"
           lora_alpha="${{ inputs.lora.lora_alpha }}"
           lora_dropout="${{ inputs.lora.lora_dropout }}"
-          quantization="${{ inputs.lora.quantization }}"
           eval_steps="${{ inputs.evaluation.eval_steps }}"
           quality_eval_type="${{ inputs.evaluation.quality_eval_type }}"
           tensorboard_enabled="${{ inputs.tensorboard_enabled }}"
@@ -140,6 +159,9 @@ jobs:
           pw_endpoints_args="--name ${endpoint_name}"
           EOF
           echo "base_model_id=\"${resolved_base_model_id}\"" >> inputs.sh
+          # Empty when 'auto'; the '/=""/d' sed below then drops the line
+          # entirely, which is what makes train.py apply the profile default.
+          echo "quantization=\"${resolved_quantization}\"" >> inputs.sh
           sed -i '/=\s*$\|=undefined\s*$/d' inputs.sh
           sed -i '/=""/d' inputs.sh
           # Only prefix genuine "VAR=" assignment lines, not a blanket
@@ -692,11 +714,13 @@ jobs:
           quantization:
             label: Quantization
             type: dropdown
-            default: >-
-              ${{ (inputs.model_profile == 'gpt-oss-20b' || inputs.model_profile == 'gpt-oss-120b') ? 'native'
-                : inputs.model_profile == 'gemma-4-31b' ? '4bit'
-                : 'none' }}
+            default: auto
+            tooltip: >-
+              'auto' defers to app/train.py's PROFILE_QUANTIZATION_DEFAULT
+              (native for the gpt-oss profiles, 4bit for gemma-4-31b, none
+              otherwise). Pick any other value to override it explicitly.
             options:
+              - { value: auto,   label: "Auto (per-profile default)" }
               - { value: none,   label: "None (bf16 LoRA)" }
               - { value: 4bit,   label: "4-bit (QLoRA)" }
               - { value: 8bit,   label: "8-bit" }
