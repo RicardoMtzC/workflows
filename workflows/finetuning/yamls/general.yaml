@@ -89,7 +89,13 @@ jobs:
               exit 1
           fi
           set +x
-          ( umask 077; printf '%s' "${{ inputs.hf_token }}" > "${PW_PARENT_JOB_DIR}/.hf_token" )
+          # An unset org secret renders as the literal string "undefined" (the
+          # prepare_model job guards the same way) -- write an empty sidecar in
+          # that case rather than a token of "undefined".
+          _hf_tok="${{ inputs.hf_token }}"
+          [ "${_hf_tok}" = "undefined" ] && _hf_tok=""
+          ( umask 077; printf '%s' "${_hf_tok}" > "${PW_PARENT_JOB_DIR}/.hf_token" )
+          unset _hf_tok
           chmod 600 "${PW_PARENT_JOB_DIR}/.hf_token"
           set -x
           cat <<'EOF' >> inputs.sh
