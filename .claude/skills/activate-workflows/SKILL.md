@@ -40,14 +40,13 @@ every workflow: it is what lets the in-workflow
   code, `script_submitter` (`v3.6`) submits the start script, the start script runs
   the service under `pw endpoints run`, and a `wait_for_endpoint` job confirms it.
   For "just run a script/sim on a cluster," call `script_submitter` directly. Do
-  **not** hand-write job submission, port allocation, or tunnel logic (the legacy
-  `session_runner` pattern is documented in reference §4 for conversions). Pure
+  **not** hand-write job submission, port allocation, or tunnel logic. Pure
   orchestration (multi-job DAG, data flow, fan-out) needs **no** subworkflow — that's
   a first-class use. Learn the patterns from the **repo's own workflows and
   tutorials**, not from invented demos (reference §9): endpoints →
   `workflows/{webshell,jupyterlab,openvscode}/`; **Singularity/SIF services →
-  `workflows/streamlit/` (simple) and `workflows/kasmvnc/` (multi-impl)**; job DAG / sessions / outputs
-  → `tutorials/session-workflows-hsp/` (staged README); **fan-out / sweep →
+  `workflows/streamlit/` (simple) and `workflows/kasmvnc/` (multi-impl)**; job DAG / outputs
+  → `tutorials/endpoint-workflows/` (staged README); **fan-out / sweep →
   `tutorials/endpoint-workflows/05-matrix.yaml`**; retry/failover →
   `tutorials/endpoint-workflows/07-failover.yaml`.
 - **Pick the deployment variant by platform host — don't default to `general`.**
@@ -57,11 +56,14 @@ every workflow: it is what lets the in-workflow
   `activate.hpc.mil`, `general` otherwise — **if unclear, ask the user.** Then copy the
   cluster/slurm/pbs form and `with:` block from the matching
   `workflows/<name>/yamls/<variant>.yaml`. (`pw context list` shows the host.)
-- **Pass every required subworkflow input, and `--dry-run` first.** A subworkflow's
-  defaults-filler does NOT apply its own `hidden`/`ignore` rules, so non-optional
-  fields with no default must be passed explicitly even when its form would hide
-  them (e.g. `script_submitter`'s `cleanup_script_path`). `--dry-run` catches this —
-  and variant/field mismatches — cheaply before you burn a real run.
+- **Pass every required subworkflow input, and `--dry-run` first.** `--dry-run`
+  validates the YAML and each subworkflow's required inputs: omit a non-optional input
+  with no default and it fails with the terse `Could not parse subworkflow` (the field
+  is never named — diff your `with:` block against the subworkflow's form). Inputs the
+  form hides and ignores under the values you pass are NOT required
+  (`script_submitter` with `define_cleanup_script: false` needs no
+  `cleanup_script_path`). Dry-run does NOT flag unknown or wrong-variant fields; they
+  pass silently and surface only at run time (verified 2026-09-16).
 - **Develop on the target machine before touching YAML.** The YAML is a thin wrapper
   around code that already works there (directly if this shell is the target's login
   node, else via `pw ssh <resource>` — Step 1).
@@ -112,10 +114,10 @@ Provide the two contract scripts:
 - **`start-template.sh`** — launches the service under
   `pw endpoints run ${pw_endpoints_args} -- <cmd with {port}>`, and **fails loud**:
   if `pw endpoints run` exits without the endpoint registered, exit non-zero so
-  the submitter job fails and the session_runner's cancel-jobs step stops
+  the submitter job fails and the submitter job's cancel-jobs step stops
   `wait_for_endpoint` (copy the tail of `workflows/webshell/app/start-template.sh`).
   Do NOT self-cancel the run with `pw workflows runs cancel` from inside a start
-  template — that was removed everywhere (it marked failed runs as canceled).
+  template.
 
 **Path rule (learned the hard way):** only the runtime subtree is checked out —
 `workflows/<name>/app` (single-implementation) or `workflows/<name>/<impl>` — and it
@@ -124,8 +126,7 @@ script builds to reach repo files (including ones composed from variables like
 `"${PW_PARENT_JOB_DIR}/${service_name}"`) must carry that full prefix. Keep
 `yamls/`, `thumbnails/`, and READMEs out of `app/` so runs never materialize them.
 
-**Getting the scripts onto the node — use `parallelworks/checkout`, never base64**
-(reference §10). The repo is fetched from GitHub **at runtime**, so nothing you edit
+**Getting the scripts onto the node — use `parallelworks/checkout`. The repo is fetched from GitHub **at runtime**, so nothing you edit
 locally takes effect until it is pushed. Two modes depending on whether Claude can
 push to the repo:
 1. **Write access (recommended):** ask the user to grant a **deploy key with write
@@ -141,7 +142,9 @@ push to the repo:
 
 Pass `script_submitter`'s inputs **from the matching variant's YAML** (`resource`,
 `use_existing_script`+`script_path`, `scheduler`, `slurm`/`pbs`, and the
-`skip_cleanups_file` wiring — copy the whole `with:` block). Add
+`skip_cleanups_file` wiring — copy the whole `with:` block). `skip_cleanups_file` exists
+only for endpoint workflows (it is what lets the service outlive the run); a plain
+batch job leaves it unset. Add
 `include-workspace: true` on the `compute-clusters` input if the workspace should be
 selectable. The hidden `service.name` input is the **endpoint name prefix** — keep it
 stable (renaming it changes endpoint names users see).
@@ -150,7 +153,9 @@ stable (renaming it changes endpoint names users see).
 base-URL config and no nginx (reference §11/§12); `--slug` handles a landing path or
 query string.
 
-Numbers from `integer` inputs arrive as **strings**; guard with `${var:-default}`.
+`integer` inputs render as bare digits in the shell and compare numerically in
+expressions (`inputs.n == 5`, `inputs.n > 3` — verified 2026-09-16). An **optional
+integer left unset renders empty**, so guard those with `${var:-default}`.
 
 ## Step 3 — Test end-to-end and record the test
 
@@ -172,6 +177,12 @@ python3 tools/tests/run-workflow-test.py workflows/<name>/tests/<variant>/<test>
 Pass = `result=pass` and `cleanup=ok` in the row the runner appends. On failure read
 `tests/<variant>/logs/<slug>.txt` and `pw workflows runs errors <slug>`, fix, push,
 re-run. Commit the test files and CSV rows with the change; never edit a CSV by hand.
+
+**If the `pw` client is not authenticated** (or cannot reach the platform from this
+shell), still write the test JSON under `workflows/<name>/tests/<variant>/`, then
+hand the exact runner command above to the user and ask them to run it (after
+`pw auth`) and report the appended row. Never skip creating the test because the run
+cannot happen here, and never claim a workflow was tested if the row does not exist.
 
 Facts that still matter when running by hand (`pw workflows run /abs/path.yaml -i inputs.json`):
 - Pass the resource as its URI (`pw://alvaro/gcpsmall`) or bare name; never an IP.
@@ -208,7 +219,7 @@ resource. If files/processes aren't here, you targeted a different resource — 
 target the resource whose login node *is* this host, or `pw ssh <resource>` to it.
 Logs are always reachable via the API regardless of node:
 ```bash
-pw workflows runs logs   <slug> --job session_runner          # subworkflow steps
+pw workflows runs logs   <slug> --job session_runner          # the submitter job (its name in every YAML here)
 pw workflows runs errors <slug> -o text                       # just the failures
 ```
 
@@ -240,7 +251,8 @@ non-repetitive; point at an existing tutorial instead.
   (`cd` into it). Pass values with `echo "K=v" | tee -a $OUTPUTS` (or pipe a program
   that prints `K=v` lines) and read `${{ needs.<job>.outputs.K }}`. Drive conditional
   steps with `if: ${{ needs.X.outputs.flag == 'true' }}` — compute the boolean
-  upstream. Fan out with a **matrix strategy** (see `tutorials/endpoint-workflows/05-matrix.yaml`); fan
+  upstream. For failure/cancel handlers use the `if:` status keywords (`always`,
+  `error`, `canceled`, `!completed`; see `tutorials/if-conditions/`). Fan out with a **matrix strategy** (see `tutorials/endpoint-workflows/05-matrix.yaml`); fan
   in with `needs: [w1,w2,w3]`. For **retry/failover**, attach a `retry` block to a step
   and use `PW_WORKFLOW_STEP_CURRENT_RETRY` to pick a target per attempt — round-robin
   over a `list` input fails over across resources (see
@@ -250,9 +262,9 @@ non-repetitive; point at an existing tutorial instead.
 - **Stream progress and emit structured results.** Print incremental progress (it
   streams to `run.<JOBID>.out` / the page) and write a machine-readable result
   (JSON) — don't make the user guess whether it's alive or done.
-- **Defensive inputs:** `integer`/numeric inputs arrive as strings — guard with
-  `${var:-default}`; quote every `${{ ... }}` interpolation so empties/spaces don't
-  break the shell.
+- **Defensive inputs:** an optional input with no default renders **empty** in the
+  shell (verified for `integer`) — guard with `${var:-default}`; quote every
+  `${{ ... }}` interpolation so empties/spaces don't break the shell.
 - **Relative paths inside submitted scripts.** `script_submitter` `cd`s into `rundir`
   first; reference files relative to it, not via `${PW_PARENT_JOB_DIR}` (which may be
   unset on a SLURM/PBS compute node — the home FS is shared, so relative paths work).
@@ -284,14 +296,16 @@ non-repetitive; point at an existing tutorial instead.
 
 ## Common pitfalls (learned from real runs)
 
-- **Wrong deployment variant / mismatched resource form:** using `general`'s
-  slurm/pbs fields against an `emed`/`noaa`/`hsp` subworkflow fails `--dry-run` with
-  field errors. Match the variant to the host and copy its variant YAML form.
+- **Wrong deployment variant / mismatched resource form:** `general`'s slurm/pbs
+  fields passed to an `emed`/`noaa`/`hsp` subworkflow are NOT rejected by `--dry-run`
+  (unknown fields pass silently; verified 2026-09-16), so the mismatch surfaces only
+  at run time. Match the variant to the host and copy its variant YAML form.
 - **Resource passing:** bare name string in `-i`, not a hand-built object; login
   IPs change, so never hardcode `ip`.
-- **Subworkflow "Missing required fields":** pass non-optional subworkflow inputs
-  with no default even when its form hides them (e.g. `cleanup_script_path: ""` +
-  `define_cleanup_script: false` for `script_submitter`).
+- **`Could not parse subworkflow` on `--dry-run`:** a non-optional subworkflow input
+  with no default is missing from your `with:` block; the message never names it.
+  Hidden+ignored inputs don't count — compare your block against the fields the
+  subworkflow's form shows for the values you pass.
 - **Scheduled jobs run on a compute node** that may lack `${PW_PARENT_JOB_DIR}`; use
   paths relative to `rundir`. Cloud-burst nodes are slow to provision (**6+ min**
   observed; `idle~ → CF → RUNNING`, `POWERING_UP` while booting) — watch with
@@ -382,7 +396,8 @@ non-repetitive; point at an existing tutorial instead.
 Reusable takeaways from building a multi-agent workflow (an orchestrator on the
 workspace + a worker per cluster). Platform mechanics are in **reference §12**.
 
-- **`--dry-run` is necessary but NOT sufficient.** It only validates schema/variant.
+- **`--dry-run` is necessary but NOT sufficient.** It only validates the YAML and
+  required subworkflow inputs.
   "Tested end-to-end" (Step 3/4) means a real run, the endpoint online in
   `pw endpoints list`, exercising the *live* service, and debugging from `~/pw/jobs`. Don't
   call a workflow tested on a dry-run alone.
