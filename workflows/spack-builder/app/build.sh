@@ -135,14 +135,31 @@ fi
 GCC_PREFIX="$(gcc_built_prefix)"
 [ -n "$GCC_PREFIX" ] || { echo "::error title=Error::$GCC_SPEC not present under $SPACK_ROOT/opt after install" >&2; exit 1; }
 
-# Register the built compiler as an external. This is REQUIRED, not cosmetic:
-# intel-oneapi-mpi pulls in intel-oneapi-compilers, which itself depends on gcc,
-# and Spack v1 accepts "only external, or concrete, compilers" for the c virtual.
-# Without this the environment fails to concretize with
+# Register the built compiler as an external. REQUIRED, not cosmetic. Without it
+# the environment fails to concretize with
+#   Only external, or concrete, compilers are allowed for the c language
 #   Cannot use gcc for the c virtual, but that is required
-# even though `spack compiler list` already shows the built gcc. Registering it
-# does create a second gcc node in the DAG -- that is expected and is why
-# gcc_built_prefix() exists rather than `spack location -i`.
+# even though `spack compiler list` already lists the built gcc.
+#
+# The governing rule is Spack's own solver, concretize.lp (v1.2.2, ~line 1930):
+#
+#   error(10, "Only external, or concrete, compilers are allowed for the {0} language", Language)
+#     :- provider(ProviderNode, node(_, Language)), language(Language), build(ProviderNode).
+#
+# It names no package: it is scoped to the language virtuals (c, cxx, fortran,
+# cuda-lang, hip-lang) and fires whenever a node PROVIDING one of them would have
+# to be built in that solve. So it is not an Intel-specific quirk, though
+# intel-oneapi-mpi is where it was observed here -- intel-oneapi-compilers has an
+# explicit `depends_on gcc`, which forces a gcc node that must be built. For
+# other packages an already-installed gcc can often be reused as "concrete" and
+# the rule never fires, so which specs break without this registration depends on
+# what reuse can supply. Maintainers have reported hitting it with OpenMPI too.
+#
+# "External" here does not mean "installed outside Spack" -- the prefix points
+# back into Spack's own install tree. It means "a compiler Spack may use as a
+# toolchain". Registering it adds a second gcc entry sharing that prefix, which
+# is expected, and is why gcc_built_prefix() exists rather than
+# `spack location -i` (which then fails with "matches multiple packages").
 #
 # Test for the external ENTRY (by prefix), not for the name in `spack compiler
 # list`: the installed package already appears there, so a name check would
