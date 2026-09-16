@@ -4,15 +4,25 @@ spack:
     unify: false
     reuse: true
 
-  # NOTE: `config: install_tree: padded_length` is deliberately NOT set.
-  # Padding would let cached binaries relocate into a longer prefix, but at 128
-  # it pushed install paths to ~194 characters and gmake@4.4.1 failed to build:
-  # config.status could not create lib/Makefile ("mv: cannot move
-  # './confXXXX/out' to 'lib/Makefile'"). Verified by isolating it -- the same
-  # spec hash that failed padded installed in 15s unpadded.
-  # The cost: binaries in the build cache relocate only into a prefix no longer
-  # than the one they were built in. Reinstalling at the SAME prefix -- the
-  # normal case for re-running this workflow on a cluster -- works fine.
+  config:
+    install_tree:
+      # Pad the install root to a fixed width so cached binaries stay
+      # RELOCATABLE. Without it Spack can only move a package into a prefix no
+      # longer than the one it was built in, and refuses otherwise:
+      #   CannotGrowString: ... because the new prefix is longer. To fix this,
+      #   compile with more padding (config:install_tree:padded_length)
+      # That makes a build cache tied to the exact install root that produced it,
+      # which defeats archiving one and redeploying it on another cluster.
+      # 128 is Spack's conventional value and leaves headroom for any target root
+      # up to 128 characters.
+      #
+      # This was briefly removed after gmake@4.4.1 failed a padded build, but
+      # that was a misattribution: gmake, ncurses, openssl and libiconv all build
+      # cleanly at 128 with ~195-character install paths. The original failure
+      # ("config.status: could not create lib/Makefile" after mv of a temp file)
+      # is far more consistent with a stale stage directory from the preceding
+      # run than with path length.
+      padded_length: 128
 
   packages:
     all:

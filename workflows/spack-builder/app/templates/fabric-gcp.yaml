@@ -25,17 +25,27 @@
 #     against an openmpi with no Slurm support, while the module tree advertised
 #     the other one. Stating version and variants as package requirements makes
 #     every consumer resolve to the same instance.
+#
+# OFI-only, deliberately. This fragment previously configured UCX with
+# "+rdmacm +verbs" while its own rationale said GCP exposes OFI WITHOUT a classic
+# verbs device -- and that contradiction is not theoretical: on a GCE cluster
+# detection reports HAS_VERBS=0, the image ships neither
+# /usr/include/rdma/rdma_cma.h nor infiniband/verbs.h, and ucx@1.17.0 failed with
+#   configure: error: RDMACM requested but required file (rdma/rdma_cma.h)
+#   could not be found in /usr
+# The registered rdma-core external supplies runtime libraries only, not headers
+# (the same shape as the missing slurm-devel that forced mpich off +slurm).
+#
+# A GCP cluster that really does have InfiniBand/RoCE wants UCX over verbs, which
+# is what the azure/oracle fragments describe; select one with the manual
+# overrides rather than widening this one.
 fabric:
   packages:
     libfabric:
-      variants: fabrics=tcp,shm,verbs,rxm,rxd,sockets,udp
-    ucx:
-      variants: +rdmacm +verbs +rc +ud +dc
-      require:
-      - '@1.17.0'
+      variants: fabrics=tcp,shm,rxm,rxd,sockets,udp
     openmpi:
       require:
-      - schedulers=slurm fabrics=ofi,ucx
+      - schedulers=slurm fabrics=ofi
     mpich:
       require:
       - device=ch4 netmod=ofi pmi=pmi2

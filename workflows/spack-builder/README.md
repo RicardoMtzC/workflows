@@ -68,13 +68,48 @@ install from it. Notes:
 - On a cold cache Spack warns `cannot be used in concretization (no index found)`.
   That is expected: an empty mirror cannot be indexed. The index appears with the
   first push.
-- Install paths are **not** padded. `padded_length: 128` was tried and backed
-  out: it pushed install paths to ~194 characters and `gmake@4.4.1` failed to
-  configure (`config.status: error: could not create lib/Makefile`). The same
-  spec hash installed in 15s unpadded, which isolates padding as the cause.
-  Consequence: cached binaries relocate only into a prefix **no longer** than the
-  one they were built in. Reinstalling at the same prefix — re-running this
-  workflow on a cluster — works fine, which is the case that matters here.
+- Install paths are padded (`padded_length: 128`) so the cache stays
+  **relocatable**. Without padding Spack refuses to move a package into a longer
+  prefix (`CannotGrowString: ... because the new prefix is longer`), which ties a
+  build cache to the exact install root that produced it. Verified both ways on
+  an unpadded cache: redeploying into a *shorter* root worked in seconds and the
+  binaries ran with no references to the original prefix, while a *longer* root
+  failed outright. 128 leaves headroom for any target root up to 128 characters.
+
+### Archiving and redeploying the build cache
+
+The cache is a plain directory, so the robust way to move it is to tar it and
+copy it — no symlinks are involved, and `build.sh` pushes with `--update-index`,
+so the index is current and no extra sync step is needed:
+
+```bash
+tar -czf spack-buildcache.tar.gz -C "$(dirname "$buildcache_path")" "$(basename "$buildcache_path")"
+```
+
+Two things to know before shipping one:
+
+- **Relocation is what padding buys.** With `padded_length: 128` the binaries can
+  be unpacked and installed under a different root. An *unpadded* cache can only
+  ever move to a root no longer than the one it was built in.
+- **The cache contains `intel-oneapi-mpi`,** because `build.sh` pushes with
+  `--private` (without it Spack silently skips non-redistributable packages and
+  leaves a hole where the slowest package should be). Intel oneAPI has
+  redistribution terms, so keep such an archive in a private bucket, or push
+  without `--private` to omit it.
+
+## Build times (rule of thumb)
+
+**Budget roughly 2 hours on 8 cores for a cold CPU-only build.** One measured
+sample: 100 packages, ~1.6 h wall clock at `-j8` on the `generic` profile with an
+empty cache.
+
+`gcc@14.2.0` is ~30 min of that and everything waits on it, so a second run
+against the same prefix and target is far quicker — it comes back from the build
+cache. The rest is cheaper than "three MPIs and three GROMACS" sounds: Intel MPI
+is a prebuilt tarball that never compiles, and CPU-only GROMACS is minutes per
+build. More cores help sublinearly, since gcc's bootstrap does not parallelise
+well. Times exclude cloning Spack and downloading sources, which are
+internet-bound rather than CPU-bound.
 
 ## Overrides
 

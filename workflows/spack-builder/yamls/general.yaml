@@ -388,3 +388,30 @@ jobs:
             is_enabled: false
           pbs:
             is_enabled: false
+
+  # -------------------------------------------------------------------------
+  # 4. Turn a failed build into a failed RUN.
+  #    script_submitter's unscheduled path detaches the script with setsid and
+  #    then polls `kill -0`, so it observes that the process ended but never its
+  #    exit status. Without this job a build that dies half way -- as the first
+  #    gce2 run did, on ucx -- is still reported as completed, and a user would
+  #    believe a stack exists that does not.
+  # -------------------------------------------------------------------------
+  verify:
+    needs:
+      - preprocess
+      - build
+    ssh:
+      remoteHost: ${{ inputs.cluster.resource.ip }}
+    steps:
+      - name: Confirm the build succeeded
+        run: |
+          set -uo pipefail
+          STATUS_FILE="${{ needs.preprocess.outputs.RUNDIR }}/BUILD_STATUS"
+          st="$(cat "${STATUS_FILE}" 2>/dev/null || echo missing)"
+          echo "build.sh exit status: ${st}"
+          if [ "${st}" != "0" ]; then
+            echo "::error title=Error::Build failed (status '${st}'). See run.*.out in ${{ needs.preprocess.outputs.RUNDIR }}"
+            exit 1
+          fi
+          echo "::notice::Build completed successfully"

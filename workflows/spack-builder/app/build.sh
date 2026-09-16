@@ -33,6 +33,16 @@ MIRROR_NAME="local-buildcache"
 
 log() { printf '\n=== [build] %s ===\n' "$*"; }
 
+# Record the real exit status where the workflow can read it.
+# script_submitter's UNSCHEDULED path (scheduler: false -> ssh_job) detaches this
+# script with setsid and then polls `kill -0`, so it can see that the process
+# ended but never why: a failed build otherwise reports a COMPLETED run. Verified
+# on gce2 -- ucx failed to compile, build.sh aborted before the push and module
+# steps, and the platform still recorded the run as completed.
+BUILD_STATUS_FILE="${PWD}/BUILD_STATUS"
+rm -f "$BUILD_STATUS_FILE"
+trap 'printf "%s\n" "$?" > "$BUILD_STATUS_FILE"' EXIT
+
 # ---------------------------------------------------------------------------
 # 0. Cancellation hook, written FIRST so a cancel at any later moment finds it.
 #    script_submitter runs this on teardown; `spack install` leaves a lock in
