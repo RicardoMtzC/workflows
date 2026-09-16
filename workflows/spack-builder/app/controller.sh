@@ -95,6 +95,21 @@ cp "$APP_DIR/packages.yaml" "$SPACK_ROOT/etc/spack/packages.yaml"
 spack external find --scope site --not-buildable slurm rdma-core || true
 spack external find --scope site libfabric ucx || true
 
+# gmake is a build tool, not part of the delivered stack, and compiling it is
+# where padded install paths bite: with config:install_tree:padded_length set,
+# gmake@4.4.1's config.status intermittently dies with
+#   mv: cannot move './confXXXXXX/out' to 'doc/Makefile': No such file or directory
+#   config.status: error: could not create doc/Makefile
+# It is genuinely intermittent rather than deterministic -- the same padded build
+# failed on two clusters and succeeded on a third attempt with identical settings
+# -- so registering the system make and letting Spack reuse it removes the
+# flakiest package from the build entirely.
+#
+# Deliberately NOT --not-buildable: if some package ever needs a newer make than
+# the image ships, Spack should still be free to build one rather than failing to
+# concretize.
+spack external find --scope site gmake || true
+
 # ---------------------------------------------------------------------------
 # 4. System compiler. This is only the bootstrap compiler: it builds the stack
 #    compiler that spack.yaml requires. build.sh registers that one afterwards.
