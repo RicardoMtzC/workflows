@@ -49,6 +49,146 @@ all 5 non-gpt-oss-120b profiles now PASS end-to-end this way. See "Session
 2026-09-11" below — read its "Status" line first; it supersedes
 2026-09-10's dataset/hyperparameter defaults where they differ.
 
+Extended again 2026-09-15 — **data-egress audit pass, then 4 profiles
+re-validated on `gce`** (same cloud-bursted single-H100 `gpu` partition).
+Hardening landed for token handling, TensorBoard exposure, offline enforcement
+and build-time telemetry; one real workflow bug was found *by running it*
+(the `lora.quantization` chained-ternary default) and fixed. See "Session
+2026-09-15" immediately below — it supersedes 2026-09-11 where they differ,
+and records eight open discrepancies for later work.
+
+---
+
+## Session 2026-09-15 — data-egress audit + 4-profile revalidation on gce
+
+**Status: olmo2-1b-dev, olmoe-1b-7b-dev, gpt-oss-20b and gemma-4-31b all PASS
+end-to-end via real `pw workflows run` on `gce` (runs `in-akita`,
+`nearby-salmon`, `meet-fish`, `sweeping-longhorn`). One real bug found and
+fixed mid-session (`f57af32`). gpt-oss-120b and gemma-1.1-7b not exercised.**
+
+Config throughout: `gce`, `cluster.scheduler=true`, `slurm.partition=gpu`,
+`slurm.gpus=""` (see discrepancy 7), `num_gpus=1`, `vram_gb_per_gpu=80`,
+`model_source=huggingface`, default 90-row dataset and hyperparameters.
+Containers built by the workflow itself this session (`container_mode=build`),
+not prestaged.
+
+### Results
+
+| profile | quant | final train loss | final eval_loss | eval tok acc | wall clock | merged |
+|---|---|---|---|---|---|---|
+| olmo2-1b-dev | none | 0.4049 | 0.099 | 96.3% | 77.2 s | 2.9 GB |
+| olmoe-1b-7b-dev | none | 0.3097 | 0.0507 | 97.9% | 243.9 s | 13 GB |
+| gpt-oss-20b | native | 0.4066 | 0.134 | 97.6% | 279.8 s | 39 GB |
+| gemma-4-31b | 4bit | 4.9295 | 0.1734 | 97.6% | 1002.8 s | 21 GB |
+
+Four distinct LoRA targeting paths were exercised, one per profile, each
+selected correctly with no override: dense name-based (olmo2), per-expert MoE
+detection targeting attention only — 3072 expert Linears found and excluded
+(olmoe), fused-expert `target_parameters` via peft's `ParamWrapper` (gpt-oss,
+which also self-corrected `lora_dropout` 0.05 -> 0 because `ParamWrapper` does
+not support dropout), and a multimodal negative-lookahead regex excluding the
+vision tower, 410 modules matched (gemma-4).
+
+### FIXED this session: `lora.quantization`'s chained-ternary default (`f57af32`)
+
+Same failure class as `base_model_id`'s ternary (HANDOFF §8), now confirmed a
+second time and no longer theoretical. For `model_profile=gpt-oss-20b` the
+first, parenthesized `||` branch is true and should yield `native`; the
+substitution engine instead emitted the **raw source text of a different
+branch** — `"'4bit'\n"`, quotes and trailing newline intact. The newline split
+the assignment across two physical lines of `inputs.sh` and `train.py` died in
+argparse (`invalid choice: "'4bit'\n"`) about 90 seconds in, before loading a
+single weight (run `precise-ewe`, 2026-09-15).
+
+Both gpt-oss profiles and gemma-4-31b were affected. olmo2/olmoe escaped only
+because their correct answer (`'none'`) coincided with the final fallback
+branch — which is why 2026-09-11's matrix pass did not catch it.
+
+Fix: the input's default is now the literal `auto` (a real dropdown option),
+resolved in bash in *Create Inputs* exactly as `base_model_id` is. `auto`
+produces an empty value, the existing `sed '/=""/d'` drops the line, and
+`train.py`'s `resolve_quantization()` applies `PROFILE_QUANTIZATION_DEFAULT` —
+the single source of truth the ternary had been duplicating. Verified live on
+`sweeping-longhorn`: no `--quantization` in the rendered argv, and
+`report/metrics.json` recorded `quantization: 4bit`.
+
+### Open discrepancies (not addressed this session)
+
+1. **No form-level tie between `model_profile` and `container.requirements_file`.**
+   `gemma-4-31b` requires an image built from `requirements-tf5.txt`, but the
+   two inputs are independent and nothing prevents pairing it with the default
+   `requirements.txt`. Note this is *not* a diagnosability problem —
+   `app/train.py:534-550` already converts the bare `KeyError('gemma4')` into a
+   RuntimeError naming the installed transformers version and the exact
+   workflow input (verified present in code; the "Guards against picking the
+   wrong image" section below is accurate). The cost is *when*: the error
+   surfaces on the compute node after a cold boot, a 62.5 GB download and a
+   model load — ~24 minutes on this session's run — where a preprocessing-time
+   check would fail in seconds. Candidate: a guard in *Create Inputs*.
+2. **Stale comment at `yamls/general.yaml:283`** — "gemma-4-31b itself is still
+   blocked (transformers lacks the gemma4 architecture)". False since the tf5
+   image exists; this file's own "gemma-4-31b text-only fine-tuning — WORKING
+   (2026-09-05)" section contradicts it, and `sweeping-longhorn` trained the
+   profile successfully.
+3. **`base_model_id`'s ternary default (`yamls/general.yaml:565-571`) is still
+   in the file** although dead — the bash `case` overrides it and a comment
+   marks it broken. Leaving a known-broken expression in place is a trap for
+   the next reader, now that a second instance of the same class has bitten.
+   Removing it changes what the form displays as that field's default, so it
+   is a UX call, not a pure cleanup.
+4. **gemma-4's merged weights merge into 4-bit linears, not bf16.** peft warns
+   explicitly: `lora/bnb.py:377: Merge lora module to 4-bit linear may get
+   different generations due to rounding errors`. The merged artifact is 21 GB
+   (not the ~62 GB a bf16 dequant would produce) and is lossy relative to
+   adapter-on-base. `adapters/` is the lossless artifact. gpt-oss's 39 GB merge
+   behaves differently because MXFP4 leaves attention unquantized.
+5. **gemma-4's loss curve is not comparable to the other three.** Its starting
+   `eval_loss` is 7.23 against 0.44-0.69 for the others, which is what drags
+   `final_train_loss` to 4.93 even though it converges to 0.173 at 97.6% token
+   accuracy. A base instruct model starting that badly usually indicates a
+   prompt-format mismatch: the run used the generic `### Response:\n` template
+   with `advanced.chat_template_override` empty, and gemma-4 ships its own chat
+   template (`chat_template.jinja`, 18 KB, is present in the merged output).
+   Re-run with the model's own template before treating these numbers as a
+   baseline. Not investigated.
+6. **`ghcr.io/parallelworks/finetune:latest` does not exist.** An anonymous
+   manifest request returns **404** (not a rate-limit 429 and not a 403 —
+   checked directly), so `container_mode=registry` is unusable as shipped and
+   every fresh cluster pays the full build. Measured ~13 min for the 4.x pin
+   set and ~24 min for tf5 on the `gce` login node (4 CPUs). Publishing either
+   built image would remove that cost; `app/build-container.sh` already takes a
+   registry tag as its second argument.
+7. **`slurm.gpus` must be passed empty on `gce`.** The cluster reports
+   `Gres=(null)` and `RealMemory=1`, so no GPU GRES is configured; a
+   `#SBATCH --gpus=N` directive would be rejected. `--nv` exposes the H100
+   regardless. The workflow's own `cluster.slurm.gpus` default is `1`, so the
+   form default is wrong for this cluster.
+8. **`SuspendTime=300s` on `gce` makes back-to-back runs fragile.** The node
+   powers down 5 minutes after a job ends, releasing the H100. Between the
+   olmo2 and olmoe runs the autoscaler then could not reacquire an
+   `a3-highgpu-1g`: the VM never appeared (its hostname did not resolve),
+   SLURM hit `ResumeTimeout` (1200 s), marked the node down and **requeued**
+   the job (it did not fail), and the retry succeeded — ~23 minutes lost with
+   no intervention. Worth knowing before timing a demo; the requeue is
+   automatic, so the correct response is to wait, not to resubmit.
+
+### Verified working, no change needed
+
+- **Container cache separation by pin set.** With `container_mode=build` and
+  `requirements_file=requirements-tf5.txt`, `controller.sh` derived
+  `finetune-requirements-tf5.txt.sif`, found no such file, built it, and left
+  the existing 4.x image untouched at its original timestamp. Both coexist and
+  each reports its own stack (`transformers 5.16.1` / `4.56.2`). No special
+  handling is needed for a pre-existing container — the `req_slug` cache key
+  does the job its comment claims.
+- **Reusing a locally built `.sif` with no registry contact.** With
+  `container_mode=sif_path` pointing at an absolute local path, the controller
+  only validated the path — no `oras_pull_file`, no manifest request, and
+  `finetune_registry` absent from `inputs.sh` entirely. Cuts the whole build
+  stage from the run.
+- **Model cache short-circuit.** `validate_model` hit on the second gpt-oss run
+  and skipped the 13 GB re-download.
+
 ---
 
 ## Session 2026-09-11 — gce smoke-test matrix (90-row dataset, revised defaults)
