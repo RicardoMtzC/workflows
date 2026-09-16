@@ -116,20 +116,42 @@ log "Stack compiler (from spack.yaml): $GCC_SPEC"
 #    This must happen OUTSIDE the environment: the environment requires this
 #    compiler for every package, so it cannot also build it.
 # ---------------------------------------------------------------------------
-if ! spack find --format '{name}@{version}' 2>/dev/null | grep -qx "$GCC_SPEC"; then
+# Resolve the BUILT gcc by filtering to the install tree. `spack location -i
+# "$GCC_SPEC"` cannot be used here: once the compiler is registered below there
+# are two gcc@<version> entries -- the built package and the external entry that
+# points at its prefix -- and location fails with "matches multiple packages".
+gcc_built_prefix() {
+  spack find --format '{prefix}' "$GCC_SPEC" 2>/dev/null | grep "^${SPACK_ROOT}/opt/" | head -1
+}
+
+if [ -z "$(gcc_built_prefix)" ]; then
   log "Installing stack compiler $GCC_SPEC (long; cached after the first run)"
   spack install --no-check-signature -j"$JOBS" "$GCC_SPEC"
   spack buildcache push --unsigned --update-index --private "$MIRROR_NAME" "$GCC_SPEC" || true
 else
   log "Stack compiler $GCC_SPEC already installed"
 fi
-# NOTE: do NOT run `spack compiler find` on the prefix just installed. In Spack
-# v1 compilers are ordinary packages, so an installed gcc already satisfies the
-# c/cxx/fortran requirement in spack.yaml. Registering it additionally as an
-# EXTERNAL created a second gcc@14.2.0 entry pointing at the built one's own
-# prefix, after which `spack location -i gcc@14.2.0` failed with
-# "matches multiple packages".
-spack find --format '{name}@{version} /{hash:7}' "$GCC_SPEC"
+
+GCC_PREFIX="$(gcc_built_prefix)"
+[ -n "$GCC_PREFIX" ] || { echo "::error title=Error::$GCC_SPEC not present under $SPACK_ROOT/opt after install" >&2; exit 1; }
+
+# Register the built compiler as an external. This is REQUIRED, not cosmetic:
+# intel-oneapi-mpi pulls in intel-oneapi-compilers, which itself depends on gcc,
+# and Spack v1 accepts "only external, or concrete, compilers" for the c virtual.
+# Without this the environment fails to concretize with
+#   Cannot use gcc for the c virtual, but that is required
+# even though `spack compiler list` already shows the built gcc. Registering it
+# does create a second gcc node in the DAG -- that is expected and is why
+# gcc_built_prefix() exists rather than `spack location -i`.
+#
+# Test for the external ENTRY (by prefix), not for the name in `spack compiler
+# list`: the installed package already appears there, so a name check would
+# always skip the registration and reintroduce the concretization failure.
+if ! spack config --scope site get packages 2>/dev/null | grep -q "$GCC_PREFIX"; then
+  log "Registering $GCC_SPEC as a site compiler"
+  spack compiler find --scope site "$GCC_PREFIX"
+fi
+spack compiler list
 
 # ---------------------------------------------------------------------------
 # 4. Concretize. This is the gate: everything above is setup, and a clean DAG
