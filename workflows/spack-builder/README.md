@@ -100,6 +100,15 @@ module load openmpi/<version>-gcc-<gccver>      # or mpich / intel-oneapi-mpi
 module load gromacs/<version>-openmpi-<version>
 ```
 
+**There is deliberately no `gcc` module**, and there cannot be one. Two mandatory
+constraints collide: the stack compiler must be registered as an *external* (the
+solver refuses to build the provider of the `c` virtual, see `build.sh`), and
+externals must be excluded from the module tree (they have no modulefile, and
+`autoload: direct` turns one missing requirement into a failure of the entire
+`module load`). Nothing is lost by this: every package is RPATH-linked to the
+compiler, and `gcc-runtime` carries the runtime libraries. If you want the
+compiler itself on `PATH`, use `spack load gcc`.
+
 Use the **full** module name. Plain `module load openmpi` can match a system
 module of the same name earlier on `MODULEPATH` and silently give you the system
 MPI instead.

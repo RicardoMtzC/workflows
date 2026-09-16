@@ -43,32 +43,46 @@ log() { printf '[detect] %s\n' "$*" >&2; }
 # 1. Cloud identity via metadata endpoints (short timeouts; all are link-local).
 # ---------------------------------------------------------------------------
 detect_cloud() {
-  # AWS IMDSv2 (token-based) then IMDSv1 fallback.
-  local t
-  if t=$(curl -s --max-time 1 -X PUT "http://169.254.169.254/latest/api/token" \
-          -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null) && [ -n "$t" ]; then
-    if curl -s --max-time 1 -H "X-aws-ec2-metadata-token: $t" \
-         "http://169.254.169.254/latest/meta-data/instance-id" >/dev/null 2>&1; then
-      echo aws; return
-    fi
-  fi
-  # Azure IMDS requires the Metadata:true header and a distinct path.
-  if curl -s --max-time 1 -H "Metadata:true" \
-       "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
-       >/dev/null 2>&1; then
-    echo azure; return
-  fi
-  # GCP metadata server, distinct host header.
-  if curl -s --max-time 1 -H "Metadata-Flavor: Google" \
-       "http://metadata.google.internal/computeMetadata/v1/instance/id" \
-       >/dev/null 2>&1; then
+  # Every probe uses `curl -sf`. Without --fail, curl exits 0 on an HTTP error
+  # response, and 169.254.169.254 is the link-local metadata address on AWS,
+  # Azure AND Oracle -- so on GCP the AWS IMDSv2 probe received a 1599-byte HTML
+  # error page, `[ -n "$t" ]` passed, the instance-id GET "succeeded" with exit 0,
+  # and a GCE node reported CLOUD=aws. That in turn made the gcp fabric profile
+  # unreachable on GCP, since it is only selected when CLOUD=gcp.
+  #
+  # Order matters too: GCP is checked first because it is the only provider with
+  # a distinctive hostname rather than the shared link-local address.
+  local t id
+
+  # GCP: distinct hostname, and the Metadata-Flavor header is mandatory.
+  if curl -sf --max-time 2 -H "Metadata-Flavor: Google" \
+       "http://metadata.google.internal/computeMetadata/v1/instance/id" >/dev/null 2>&1; then
     echo gcp; return
   fi
+
+  # Azure IMDS: requires Metadata:true and a distinct path.
+  if curl -sf --max-time 2 -H "Metadata:true" \
+       "http://169.254.169.254/metadata/instance?api-version=2021-02-01" >/dev/null 2>&1; then
+    echo azure; return
+  fi
+
   # Oracle OCI instance metadata (v2).
-  if curl -s --max-time 1 -H "Authorization: Bearer Oracle" \
+  if curl -sf --max-time 2 -H "Authorization: Bearer Oracle" \
        "http://169.254.169.254/opc/v2/instance/" >/dev/null 2>&1; then
     echo oracle; return
   fi
+
+  # AWS IMDSv2 last, and only trusted when the instance id actually looks like
+  # one -- a 200 from some other cloud's metadata service must not count.
+  if t=$(curl -sf --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" \
+          -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null) && [ -n "$t" ]; then
+    if id=$(curl -sf --max-time 2 -H "X-aws-ec2-metadata-token: $t" \
+         "http://169.254.169.254/latest/meta-data/instance-id" 2>/dev/null) \
+       && printf '%s' "$id" | grep -qE '^i-[0-9a-f]+$'; then
+      echo aws; return
+    fi
+  fi
+
   echo unknown
 }
 

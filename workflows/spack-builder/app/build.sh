@@ -216,7 +216,10 @@ Stack built for target: $TARGET  (fabric=$FABRIC_PROFILE, cloud=${CLOUD:-?})
 GPU path: $( [ "$GPU_ACTIVE" = "1" ] && echo "ENABLED (cuda_arch=${EFFECTIVE_ARCH})" || echo "disabled" )
 
     export MODULEPATH=$MODROOT:\$MODULEPATH
-    module load gcc
     module load openmpi      # or mpich / intel-oneapi-mpi
     module load gromacs
+
+(There is no gcc module: the stack compiler is registered as an external and
+externals are excluded from the module tree. Use 'spack load gcc' if you need
+the compiler itself on PATH.)
 EOF
