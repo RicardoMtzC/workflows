@@ -1,0 +1,205 @@
+# Spack MPI Stack Builder
+
+Builds a Spack **v1** multi-MPI HPC stack on a SLURM/PBS cluster and generates Tcl
+modules, publishing everything to a binary build cache so later runs install in
+minutes instead of hours.
+
+**This is a build workflow, not an endpoint/session service.** It runs to
+completion and exits; it registers no `pw` endpoint.
+
+## What gets built
+
+| | |
+|---|---|
+| Compiler | `gcc@14.2.0`, built with the system compiler, then used for everything else |
+| MPIs | `openmpi@5.0.10`, `mpich@4.2.2`, `intel-oneapi-mpi@2021.13.0` |
+| Applications | `gromacs@2024.3`, one build per MPI |
+| Validation | `osu-micro-benchmarks`, one build per MPI |
+| Optional GPU path | CUDA-aware `openmpi+cuda` and `gromacs+cuda` |
+
+The three MPIs coexist in one environment via `concretizer: unify: false`.
+
+## How it decides what to build for
+
+The compile runs on the **login node** — it has internet for source fetches and
+no queue walltime — but the stack is meant for the **compute nodes**, which on
+most clouds are a different instance type. So a short job runs on a worker first
+and reports its fabric, GPU and CPU microarchitecture.
+
+That split has a consequence worth understanding. Spack only emits code the build
+host can run, and `packages: all: target:` is a *preference*, so an unsupported
+target is silently dropped rather than rejected. `app/resolve-target.py` makes the
+decision explicit:
+
+- **Worker target is older than the login node** → build exactly for the worker.
+- **Worker target is newer than the login node** → the login node cannot emit it.
+  The build falls back to the login node's own target and says so loudly. Those
+  binaries still *run* on the worker (a newer microarchitecture is a superset);
+  they just leave its newer instructions unused. Build on a worker node if that
+  last few percent matters.
+
+Verified on this cluster: login node `skylake_avx512`, workers `cascadelake` — the
+fallback case.
+
+## Fabric handling
+
+| Detected | Profile | Transport |
+|---|---|---|
+| EFA device present | `aws` | libfabric/OFI, EFA provider |
+| Verbs device + Azure | `azure` | UCX over verbs |
+| Verbs device + Oracle | `oracle` | UCX over verbs |
+| GCP | `gcp` | OFI / verbs |
+| No RDMA hardware | `generic` | TCP + shared memory |
+
+Hardware is authoritative; cloud identity only breaks ties. The `aws` profile
+*requires* an EFA-capable libfabric rather than pinning a version, so a cluster
+whose EFA install cannot do EFA fails loudly instead of silently running over TCP.
+
+## Build cache
+
+Every package built is pushed to `buildcache_path` (default
+`${HOME}/spack-buildcache`), a directory-backed Spack mirror, and later runs
+install from it. Notes:
+
+- The mirror is **unsigned** — it is a private path only this account can write,
+  and requiring a GPG keyring would make every fresh cluster a manual step.
+- Pushes use `--private` because `intel-oneapi-mpi` is non-redistributable and is
+  skipped silently otherwise, leaving a hole exactly where the slowest package is.
+- On a cold cache Spack warns `cannot be used in concretization (no index found)`.
+  That is expected: an empty mirror cannot be indexed. The index appears with the
+  first push.
+- Install paths are **not** padded. `padded_length: 128` was tried and backed
+  out: it pushed install paths to ~194 characters and `gmake@4.4.1` failed to
+  configure (`config.status: error: could not create lib/Makefile`). The same
+  spec hash installed in 15s unpadded, which isolates padding as the cause.
+  Consequence: cached binaries relocate only into a prefix **no longer** than the
+  one they were built in. Reinstalling at the same prefix — re-running this
+  workflow on a cluster — works fine, which is the case that matters here.
+
+## Overrides
+
+`target`, `fabric` and `cuda-arch` are **all-or-nothing**: set all three to skip
+hardware inspection entirely (no worker is allocated), or none to inspect. Partial
+overrides are rejected. Use `cuda-arch=none` to force a CPU-only build.
+
+## Options worth knowing
+
+- **Stop after concretizing** (`concretize_only`) bootstraps Spack, sets up the
+  build cache, inspects the hardware, renders and concretizes — then stops before
+  the long compile. This is the fast way to validate a new cluster or a spec
+  change, and it is what the recorded test uses.
+- **Spack root** (`install_prefix`, default `${HOME}/spack`) must be on a
+  filesystem shared between login and compute nodes. Keeping it in user space is
+  what removes every `sudo` from this workflow.
+
+## After the build
+
+```bash
+export MODULEPATH=<install_prefix>/share/spack/modules/<arch>:$MODULEPATH
+module load openmpi/<version>-gcc-<gccver>      # or mpich / intel-oneapi-mpi
+module load gromacs/<version>-openmpi-<version>
+```
+
+Use the **full** module name. Plain `module load openmpi` can match a system
+module of the same name earlier on `MODULEPATH` and silently give you the system
+MPI instead.
+
+Always run these binaries **through the module**, not by absolute path. Intel MPI
+in particular needs the environment the module sets; invoked bare, `gmx_mpi` dies
+in `MPIDI_OFI_mpi_init_hook -> open_fabric`.
+
+The OSU binaries install under `libexec/osu-micro-benchmarks/mpi/...`, not `bin`,
+so they are not placed on `PATH` by design.
+
+Verified on this cluster: all three MPIs run `osu_latency` (0.25-0.56 us
+intra-node) and all three GROMACS builds report `2024.3-spack`.
+
+Launcher note: OpenMPI 5 dropped the `pmi` and `legacylaunchers` variants, and
+this stack does not assume a PMIx plugin in Slurm. Check `srun --mpi=list` on your
+cluster; where only `pmi2` is offered, launch with `mpirun` inside an allocation,
+or `srun --mpi=pmi2`.
+
+MPICH is built **without** `+slurm`: `--with-slurm` needs Slurm headers, and
+`slurm-devel` is absent on images that ship only the Slurm runtime. `pmi=pmi2`
+gives the integration that matters without them. On a cluster that does have the
+headers, adding `+slurm` is a reasonable improvement.
+
+MPI versions and fabric variants are stated as **package requirements**, not
+inside each spec. `gromacs` and `osu` depend on a bare `^openmpi`/`^mpich`, and
+under `unify: false` that otherwise concretizes to a different node than the
+standalone MPI spec — building two copies of every MPI and linking GROMACS
+against one while the module tree advertises the other.
+
+## Layout
+
+```
+yamls/general.yaml        preprocess -> detect (worker) -> build (login node)
+app/controller.sh         login node: bootstrap Spack, externals, build cache
+app/detect-fabric.sh      worker: fabric + GPU + microarchitecture probe
+app/build.sh              login node: render, concretize, install, push, modules
+app/resolve-profile.sh    all-or-nothing override policy
+app/resolve-target.py     reconcile worker target with what the build host can emit
+app/render-env.py         spack.yaml.in + fabric fragment -> spack.yaml
+app/packages.yaml         site externals baseline (policy, not versions)
+app/templates/            environment template + 5 fabric fragments
+tests/general/            recorded end-to-end test
+```
+
+## Known gaps and deferred work
+
+- The GPU path has not been run: this cluster has no GPUs. CUDA/driver/GCC
+  compatibility on a real GPU node is unverified.
+- The PBS path is untested.
+- Heterogeneous clusters need one run per node type; the design assumes one
+  representative worker.
+- Thumbnails are placeholders.
+- **Module flavour is Tcl.** If the site standard is Lmod, flip the template's
+  `modules.default.enable` to `[lmod]` and add a `core_compilers` list — Lmod
+  needs it to build its hierarchy.
+- **Deferred enhancements:** a GPU-aware OSU build (`-d cuda`) for device-buffer
+  bandwidth numbers, and cuFFTMp to let GROMACS spread PME across multiple GPUs.
+
+### No recorded end-to-end test yet (deferred to a follow-up PR)
+
+CLAUDE.md requires every workflow to be tested end to end and to record that test
+under `tests/<variant>/`, run by `tools/tests/run-workflow-test.py`. **This
+workflow cannot satisfy that today**, and the reason is structural rather than an
+oversight.
+
+The runner's pass criteria are the run completing *and* an endpoint appearing:
+
+```python
+row["result"], row["error"] = "fail", "run completed but no endpoint listed"
+```
+
+This workflow is a build-and-exit job. It deliberately serves no `pw` endpoint —
+it is the only workflow in the repo that does not — so a completely successful
+build is recorded as `fail`. No `_test` key opts out: `http_expect` only filters
+status codes *after* an endpoint has been found.
+
+Closing this needs a small, additive change to the shared runner, kept separate so
+it can be reviewed on its own:
+
+- `expect_endpoint: false` — skip the endpoint and HTTP checks. Defaulting it to
+  `true` leaves all existing tests (148 files, none of which set it) on exactly
+  the current code path, and `COLUMNS` need not change, so existing CSVs stay
+  valid. Three call sites are involved: the pass/fail branch, the post-run
+  endpoint lookup, and the endpoint check inside `teardown()`.
+- `success_command` — what to assert instead: a shell snippet run on the resource
+  via `pw ssh`, non-zero meaning failure. For this workflow the meaningful check
+  is that the Spack install and a populated build cache actually exist.
+
+Two further nuances specific to this workflow when that test is written:
+
+- `leftover_patterns` must be overridden. The default `["pw endpoints"]` checks
+  nothing useful for a job that never served anything; `["spack install"]` is the
+  meaningful pattern here.
+- The test should set `concretize_only: true`. A full build runs for hours, which
+  no CI-style test should do; concretizing still exercises the whole pipeline —
+  bootstrap, externals, build cache, worker inspection, render and solve — and
+  finishes in minutes.
+
+`tests/general/cpu-smoke.json` is a **draft** of that test, written against the
+proposed keys. It will not pass until the runner supports them: the unknown keys
+are merged into the test metadata but never read, so the endpoint check still runs
+and fails.

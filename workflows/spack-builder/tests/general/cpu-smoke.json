@@ -1,0 +1,30 @@
+{
+  "_test": {
+    "expect_endpoint": false,
+    "timeout_s": 5400,
+    "warm_marker": [
+      "${HOME}/spack-smoke/bin/spack",
+      "${HOME}/spack-buildcache/v3"
+    ],
+    "success_command": "set -e; test -x ${HOME}/spack-smoke/bin/spack; test -s ${HOME}/pw/jobs/spack-builder/*/spack-env/spack.lock || test -s ${HOME}/spack-smoke/etc/spack/site/packages.yaml; ls ${HOME}/spack-buildcache/v3 >/dev/null",
+    "leftover_patterns": ["spack install"]
+  },
+  "cluster": {
+    "resource": "aws",
+    "scheduler": true,
+    "slurm": {
+      "is_enabled": true,
+      "partition": "awscompute",
+      "time": "00:20:00"
+    }
+  },
+  "service": {
+    "spack_version": "v1.2.2",
+    "install_prefix": "${HOME}/spack-smoke",
+    "buildcache_path": "${HOME}/spack-buildcache",
+    "build_jobs": 8,
+    "concretize_only": true,
+    "build_gpu": false,
+    "use_overrides": false
+  }
+}

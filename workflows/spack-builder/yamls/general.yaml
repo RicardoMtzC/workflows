@@ -1,0 +1,390 @@
+# Spack MPI Stack Builder — general variant (standard cloud/on-prem SLURM & PBS).
+#
+# Builds GCC + OpenMPI + MPICH + Intel MPI + GROMACS (per MPI) + OSU (per MPI),
+# with an optional GPU path, and publishes everything to a binary build cache.
+#
+# This is a BUILD workflow, not an endpoint service: it runs to completion and
+# exits. It registers no pw endpoint and opens no session.
+#
+# Flow:
+#   preprocess -> checkout app/, write inputs.sh, bootstrap Spack + build cache
+#                 (controller.sh), decide overrides vs detection, assemble the
+#                 two submitted scripts
+#   detect     -> script_submitter, scheduler=true: runs on a WORKER node and
+#                 reports its fabric, GPU and microarchitecture into fabric.env
+#   build      -> script_submitter, scheduler=false: runs on the LOGIN node,
+#                 which has internet for source fetches and no queue walltime
+#
+# Why detection and the build run in different places: the login node is
+# routinely a different instance type from the compute nodes, so the stack has to
+# be described by the workers but is cheapest to compile on the login node.
+# build.sh reconciles the two (see app/resolve-target.py) and says out loud when
+# the login node cannot emit the workers' target.
+#
+# Override policy: target, fabric and cuda-arch are all-or-nothing. When all
+# three are set, detection is skipped entirely and no worker is allocated.
+
+permissions: ['*']
+
+'on':
+  execute:
+    inputs:
+      $meta:
+        labelPosition: top
+
+      cluster_header:
+        type: header
+        text: Target Cluster
+        size: 18
+
+      cluster:
+        type: group
+        label: Compute Cluster Settings
+        items:
+          resource:
+            type: compute-clusters
+            label: Compute cluster
+            include-workspace: false
+            optional: false
+            tooltip: >-
+              The cluster to build on. The compile runs on this resource's login
+              node; a worker is allocated only to inspect the compute hardware.
+          scheduler:
+            type: boolean
+            default: true
+            label: Inspect a compute node?
+            hidden: ${{ inputs.cluster.resource.schedulerType == '' }}
+            ignore: ${{ .hidden }}
+            tooltip: |
+              Yes → a short job runs on a WORKER to report its fabric, GPU and CPU
+                    microarchitecture, so the stack is built for the right hardware.
+              No  → inspect the login node instead. Only correct when the login and
+                    compute nodes are the same instance type.
+          slurm:
+            type: group
+            label: SLURM Directives (hardware inspection job)
+            hidden: ${{ inputs.cluster.resource.schedulerType != 'slurm' || inputs.cluster.scheduler == false }}
+            ignore: ${{ inputs.cluster.resource.schedulerType != 'slurm' || inputs.cluster.scheduler == false }}
+            items:
+              is_enabled:
+                type: boolean
+                hidden: true
+                default: true
+                label: Is SLURM Enabled? Yes, unless the slurm section is hidden and ignored
+              partition:
+                type: slurm-partitions
+                label: SLURM partition
+                optional: true
+                resource: ${{ inputs.cluster.resource }}
+                tooltip: >-
+                  The partition holding the nodes this stack is FOR. Pick the one you
+                  will run on; a heterogeneous cluster needs one run per node type.
+              time:
+                label: Walltime
+                type: string
+                default: '00:20:00'
+                tooltip: >-
+                  Inspection takes seconds, but a cloud-burst node can take 6+ minutes
+                  to power on, so the default leaves room for that.
+              gpus:
+                label: Number of GPUs
+                type: number
+                optional: true
+                min: 0
+                default: 0
+                tooltip: >-
+                  Request a GPU here when building the GPU path, so inspection lands on
+                  a node that actually has one and can report its compute capability.
+              scheduler_directives:
+                type: editor
+                optional: true
+                tooltip: |
+                  Add extra SLURM directives, one per line, using the #SBATCH prefix:
+                  #SBATCH --constraint=<feature>
+                  #SBATCH --nodelist=<node-name>
+          pbs:
+            type: group
+            label: PBS Directives (hardware inspection job)
+            hidden: ${{ inputs.cluster.resource.schedulerType != 'pbs' || inputs.cluster.scheduler == false }}
+            ignore: ${{ inputs.cluster.resource.schedulerType != 'pbs' || inputs.cluster.scheduler == false }}
+            items:
+              is_enabled:
+                type: boolean
+                hidden: true
+                default: true
+                label: Is PBS enabled? Yes, unless the pbs section is hidden and ignored
+              scheduler_directives:
+                label: Scheduler Directives
+                type: editor
+                optional: true
+                tooltip: |
+                  Add extra PBS directives, one per line, using the #PBS prefix:
+                  #PBS -l mem=16gb
+
+      spack_header:
+        type: header
+        text: Stack Options
+        size: 18
+
+      service:
+        type: group
+        items:
+          # Stable identifier prefix used for job and directory naming.
+          # Keep stable; do not template from other inputs.
+          name:
+            type: string
+            default: spack-builder
+            hidden: true
+          spack_version:
+            type: string
+            label: Spack version (git tag)
+            default: v1.2.2
+            tooltip: >-
+              Must be a v1.x tag. Compilers are dependencies in v1 and the
+              environment template relies on that; older tags will not concretize.
+          install_prefix:
+            type: string
+            label: Spack root
+            default: ${HOME}/spack
+            tooltip: >-
+              Must be on a filesystem shared between the login and compute nodes.
+              Kept in user space so no step needs sudo.
+          buildcache_path:
+            type: string
+            label: Binary build cache
+            default: ${HOME}/spack-buildcache
+            tooltip: >-
+              Directory-backed Spack mirror. Every package built here is pushed to it,
+              and later runs install from it instead of recompiling.
+          build_jobs:
+            type: number
+            label: Parallel build jobs (-j)
+            default: 8
+            min: 1
+            max: 192
+          concretize_only:
+            type: boolean
+            label: Stop after concretizing (dry run)
+            default: false
+            tooltip: >-
+              Bootstrap Spack, set up the build cache, inspect the hardware, render and
+              concretize the environment, then stop before the long compile. Use this to
+              validate a cluster or a spec change in minutes.
+          use_public_buildcache:
+            type: boolean
+            label: Also use Spack's public binary cache
+            default: false
+            tooltip: >-
+              Experimental. Can skip large builds when hashes match, but fabric-specific
+              variants usually prevent that, so it is off by default.
+          build_gpu:
+            type: boolean
+            label: Build the GPU path (CUDA-aware OpenMPI + GROMACS+cuda)
+            default: false
+            tooltip: >-
+              Opt-in. Adds a CUDA-aware OpenMPI and a GROMACS+cuda built against it.
+              The CPU MPIs and CPU GROMACS are always built regardless.
+
+          overrides_header:
+            type: header
+            text: Manual overrides (advanced — all three together or none)
+            size: 14
+          use_overrides:
+            type: boolean
+            label: Skip hardware inspection and set the profile manually
+            default: false
+            tooltip: >-
+              When on, you MUST set target, fabric and cuda-arch below; mixing some
+              overrides with inspection is rejected. With all three set, no worker node
+              is allocated at all.
+          override_target:
+            type: string
+            label: Spack microarch target
+            placeholder: x86_64_v4
+            hidden: ${{ !inputs.service.use_overrides }}
+            tooltip: e.g. x86_64_v3, x86_64_v4, neoverse_v1, zen4, cascadelake.
+          override_fabric:
+            type: dropdown
+            label: Fabric profile
+            hidden: ${{ !inputs.service.use_overrides }}
+            options:
+              - label: AWS EFA (OFI)
+                value: aws
+              - label: Azure InfiniBand (UCX/verbs)
+                value: azure
+              - label: GCP (OFI / verbs)
+                value: gcp
+              - label: Oracle RDMA (UCX/verbs)
+                value: oracle
+              - label: Generic (TCP/shm, no RDMA)
+                value: generic
+          override_cuda_arch:
+            type: string
+            label: CUDA arch (or 'none' for CPU-only)
+            placeholder: '90'
+            hidden: ${{ !inputs.service.use_overrides }}
+            tooltip: >-
+              Spack cuda_arch (80=A100, 90=H100, 89=L4/L40). Use 'none' to force a
+              CPU-only build even with overrides on.
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1. Check out app/, write inputs.sh, bootstrap Spack and the build cache on
+  #    the login node, and assemble the two scripts the submitter will run.
+  # -------------------------------------------------------------------------
+  preprocess:
+    ssh:
+      remoteHost: ${{ inputs.cluster.resource.ip }}
+    outputs:
+      RUNDIR: ${{ needs.preprocess.steps.assemble.outputs.RUNDIR }}
+      DETECT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.DETECT_SCRIPT }}
+      BUILD_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.BUILD_SCRIPT }}
+      NEED_DETECT: ${{ needs.preprocess.steps.assemble.outputs.NEED_DETECT }}
+    steps:
+      - name: Checkout workflow app
+        uses: parallelworks/checkout
+        with:
+          repo: https://github.com/parallelworks/workflows.git
+          branch: add-spack-builder
+          sparse_checkout:
+            - workflows/spack-builder/app
+            - tools/utils
+
+      - name: Create Inputs
+        run: |
+          set -x
+          # Write PW variables
+          env | grep '^PW_' | grep -v 'PW_API_KEY' > inputs.sh
+          # Encase values between quotes
+          sed -i 's/=\(.*\)/="\1"/' inputs.sh
+          cat <<'EOF' >> inputs.sh
+          PATH=$HOME/pw:$PATH
+          app_dir="${PWD}/workflows/spack-builder/app"
+          fabric_env="${PWD}/fabric.env"
+          env_dir="${PWD}/spack-env"
+          service_name="${{ inputs.service.name }}"
+          service_spack_version="${{ inputs.service.spack_version }}"
+          service_install_prefix="${{ inputs.service.install_prefix }}"
+          service_buildcache_path="${{ inputs.service.buildcache_path }}"
+          service_build_jobs="${{ inputs.service.build_jobs }}"
+          service_build_gpu="${{ inputs.service.build_gpu }}"
+          service_concretize_only="${{ inputs.service.concretize_only }}"
+          service_use_public_buildcache="${{ inputs.service.use_public_buildcache }}"
+          OVERRIDE_TARGET="${{ inputs.service.use_overrides && inputs.service.override_target || '' }}"
+          OVERRIDE_FABRIC="${{ inputs.service.use_overrides && inputs.service.override_fabric || '' }}"
+          OVERRIDE_CUDA_ARCH="${{ inputs.service.use_overrides && inputs.service.override_cuda_arch || '' }}"
+          EOF
+          # Remove empty variables
+          sed -i '/=\s*$\|=undefined\s*$/d' inputs.sh
+          sed -i '/=""/d' inputs.sh
+          # Add export to all lines
+          sed -i 's/^/export /' inputs.sh
+          cat inputs.sh
+
+      - name: Controller Preprocessing
+        run: |
+          set -euo pipefail
+          set -x
+          # The login node is the one with internet: bootstrap Spack, reconcile
+          # site externals and register the build cache here, once, before
+          # anything is submitted. The inspection job needs this Spack to exist
+          # so it can report `spack arch -t`.
+          cp inputs.sh controller-${PW_JOB_ID}.sh
+          cat "workflows/spack-builder/app/controller.sh" >> controller-${PW_JOB_ID}.sh
+          bash controller-${PW_JOB_ID}.sh
+
+      - name: Assemble scripts
+        id: assemble
+        run: |
+          set -euo pipefail
+          set -x
+          set -a; . ./inputs.sh; set +a
+
+          # All-or-nothing override policy. When it returns NEED_DETECT=0 the
+          # fabric profile is already written and no worker is allocated.
+          bash "workflows/spack-builder/app/resolve-profile.sh" \
+               "${PWD}/profile.decision" "${PWD}/fabric.env"
+          . "${PWD}/profile.decision"
+          echo "NEED_DETECT=${NEED_DETECT}" | tee -a $OUTPUTS
+          # Both submitted jobs must land in THIS directory: it holds inputs.sh,
+          # fabric.env and the checked-out app/ tree.
+          echo "RUNDIR=${PWD}" | tee -a $OUTPUTS
+
+          # script_submitter runs an existing script, so each one is inputs.sh
+          # concatenated with its body. Note this puts the script in the run
+          # directory, not in app/ -- which is why the scripts take their paths
+          # from inputs.sh rather than from $BASH_SOURCE.
+          cp inputs.sh detect-${PW_JOB_ID}.sh
+          cat "workflows/spack-builder/app/detect-fabric.sh" >> detect-${PW_JOB_ID}.sh
+          echo "DETECT_SCRIPT=${PWD}/detect-${PW_JOB_ID}.sh" | tee -a $OUTPUTS
+
+          cp inputs.sh build-${PW_JOB_ID}.sh
+          cat "workflows/spack-builder/app/build.sh" >> build-${PW_JOB_ID}.sh
+          echo "BUILD_SCRIPT=${PWD}/build-${PW_JOB_ID}.sh" | tee -a $OUTPUTS
+
+  # -------------------------------------------------------------------------
+  # 2. Inspect the compute hardware. Skipped entirely when complete overrides
+  #    were supplied, so no worker is allocated in that case.
+  # -------------------------------------------------------------------------
+  detect:
+    needs:
+      - preprocess
+    if: ${{ needs.preprocess.outputs.NEED_DETECT == '1' }}
+    steps:
+      - name: Inspect compute node
+        uses: github/parallelworks/workflows@add-spack-builder
+        early-cancel: any-job-failed
+        with:
+          $yaml: workflows/script_submitter/v3.6/general.yaml
+          resource: ${{ inputs.cluster.resource }}
+          shebang: '#!/bin/bash'
+          rundir: ${{ needs.preprocess.outputs.RUNDIR }}
+          use_existing_script: true
+          script_path: ${{ needs.preprocess.outputs.DETECT_SCRIPT }}
+          define_cleanup_script: true
+          cleanup_script_path: ./cancel.sh
+          scheduler: ${{ inputs.cluster.scheduler }}
+          use_scheduler_agent: false
+          submit_and_exit: false
+          skip_cleanups_file: ''
+          slurm:
+            is_enabled: ${{ inputs.cluster.slurm.is_enabled }}
+            partition: ${{ inputs.cluster.slurm.partition }}
+            scheduler_directives: ${{ inputs.cluster.slurm.scheduler_directives }}
+            time: ${{ inputs.cluster.slurm.time }}
+            gpus: ${{ inputs.cluster.slurm.gpus }}
+          pbs:
+            is_enabled: ${{ inputs.cluster.pbs.is_enabled }}
+            scheduler_directives: ${{ inputs.cluster.pbs.scheduler_directives }}
+
+  # -------------------------------------------------------------------------
+  # 3. Build on the LOGIN node: scheduler=false sends this down
+  #    script_submitter's ssh_job path, so there is no queue walltime bounding a
+  #    multi-hour compile and source fetches have internet. Output still streams
+  #    to run.<JOBID>.out for platform log visibility.
+  # -------------------------------------------------------------------------
+  build:
+    needs:
+      - preprocess
+      - detect
+    steps:
+      - name: Build the stack
+        uses: github/parallelworks/workflows@add-spack-builder
+        early-cancel: any-job-failed
+        with:
+          $yaml: workflows/script_submitter/v3.6/general.yaml
+          resource: ${{ inputs.cluster.resource }}
+          shebang: '#!/bin/bash'
+          rundir: ${{ needs.preprocess.outputs.RUNDIR }}
+          use_existing_script: true
+          script_path: ${{ needs.preprocess.outputs.BUILD_SCRIPT }}
+          define_cleanup_script: true
+          cleanup_script_path: ./cancel.sh
+          scheduler: false
+          use_scheduler_agent: false
+          submit_and_exit: false
+          skip_cleanups_file: ''
+          slurm:
+            is_enabled: false
+          pbs:
+            is_enabled: false
