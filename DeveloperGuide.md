@@ -94,6 +94,10 @@ Requirements: listen on **`service_port`**, write a **`cancel.sh`**, end with
    `<service.name>-${PW_RUN_SLUG}` is online, then leave the service running
    (`SKIP_CLEANUP` marker) and cancel the submitter's wait.
 
+On a Kubernetes cluster the same endpoint is registered by a `pw-cli` sidecar in the
+pod, the run stays alive streaming pod logs, and cancelling the run is the teardown;
+see [.claude/skills/activate-workflows/references/k8s-workflows.md](.claude/skills/activate-workflows/references/k8s-workflows.md).
+
 **Copy a real one instead of writing from scratch** —
 `workflows/webshell/yamls/general.yaml` is the smallest complete example;
 `workflows/jupyterlab/yamls/general.yaml` shows a conda install plus support files;
@@ -178,10 +182,8 @@ Everything a run did is in its job dir on the execution node:
   the form (and its defaults) are the wrong variant's.
 - **"Authentication has expired"** — `pw` tokens lapse; re-run `pw auth`.
 
-## Appendix: converting a legacy workflow
+## Appendix: converting an older workflow
 
-Nothing in this repo uses the older session pattern (a `sessions:` block + the
-`session_runner` subworkflow). To convert a legacy workflow to the endpoint pattern
-and bring it here, follow
-`.claude/skills/activate-workflows/references/session-to-endpoint-upgrade.md`;
-which workflows are still legacy and where they live is in MIGRATION.md.
+To bring an older workflow onto the endpoint pattern, follow
+`.claude/skills/activate-workflows/references/session-to-endpoint-upgrade.md`; which
+workflows those are and where they live is in MIGRATION.md.

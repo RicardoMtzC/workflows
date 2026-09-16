@@ -116,7 +116,7 @@
 | Port | `session_runner` allocates `${service_port}` | `pw endpoints run` assigns it — reference it as the literal **`{port}`** token (also env `PORT`), never `${port}` |
 | Submission | `session_runner` (wraps script_submitter) | **`script_submitter/v3.6` directly** — preprocessing does the controller + script assembly itself |
 | Lifecycle (non-k8s) | run alive for the session's life | run **completes** once the endpoint registers; service outlives it; teardown = `pw endpoints delete <name>` (kills the remote process tree) |
-| Lifecycle (k8s) | run alive streaming logs | unchanged — run stays alive; **cancel run = teardown** (a Deployment restarts an exited sidecar, so the endpoint can't own the pod lifecycle) |
+| Lifecycle (k8s) | run alive streaming logs | unchanged — run stays alive; **cancel run = teardown** ([k8s-workflows.md §2](k8s-workflows.md)) |
 
 Endpoint name convention: **`<service-name>-${PW_RUN_SLUG}`** — built in preprocessing,
 polled in `wait_for_endpoint`. Both jobs see the same value because `PW_RUN_SLUG` is
@@ -205,30 +205,30 @@ Contract differences vs v3:
 7. `parallelworks/checkout` → your **dev branch** while testing; **flip to `main`
    after merge** (both openvscode and jupyterlab needed this follow-up).
 
-## Step 4 — `general_k8s_v5.yaml`
+## Step 4 — the Kubernetes half (`general_k8s.yaml`, standalone `k8s.yaml`)
 
-Start from `workflow/yamls/jupyterlab-host/general_k8s_v5.yaml` (it includes two
-improvements over openvscode's): all of Step 3, plus:
+The v4 k8s pattern — a top-level `sessions:` block (`useCustomDomain: true`) and a
+`create_k8s_session` job calling `parallelworks/update-session` with a `targetInfo` of
+`{name: <cluster>, namespace, resourceType: services, resourceName: <app>-lb}` — makes
+the platform tunnel into a k8s Service itself. It still works (verified 2026-09-16: the
+session URL is `externalHref` in `pw sessions ls -o json`), but it is not the repo
+pattern. On top of Step 3 (the sidecar itself: [k8s-workflows.md §2](k8s-workflows.md)):
 
-- Top-level `env: { PW_API_KEY: ${PW_API_KEY} }`.
-- **Delete the k8s `Service` manifest and the `update-session` job.** Instead add a
-  **`pw-cli` sidecar** to the Deployment: `ghcr.io/parallelworks/pw-cli:v7.79.0`,
-  args `endpoints http --name <name>-${PW_RUN_SLUG} --slug <slug> --output text <port>`,
-  env `PW_PLATFORM_HOST` (inline) + `PW_API_KEY` from a Secret.
-- **Create API Key Secret** step (idempotent `kubectl create secret … --dry-run=client
-  -o yaml | kubectl apply -f -`) with a `cleanup:` that deletes it. Cleanup order ends
-  up: deployment → secret → PVC (reverse step order) — correct dependency order.
-- `Stream Logs` gets `--all-containers` (sidecar logs are your endpoint diagnostics).
-- Replace `create_k8s_session` with `wait_for_endpoint_k8s` (waits for `pod.running`,
-  then polls `pw endpoints list`).
-- **No `skip_cleanups_file` on the k8s path** — the run must stay alive (log
-  streaming) and cancel-run is the teardown.
-- Guard *Controller Preprocessing* and *Create Service Script* with
-  `if: ${{ inputs.resource.type != 'kubernetes' }}` so a k8s run doesn't install the
-  non-k8s software on the workspace exec node (jupyterlab improvement; openvscode
-  installs unconditionally).
-- App container: prefer a container-agnostic launch (`command: ["jupyter","lab"]` +
-  explicit `--ServerApp.port=<image_port>`) over image-specific entrypoint scripts.
+1. Replace the `sessions:` block with `env: {PW_API_KEY: ${PW_API_KEY}}`.
+2. Delete the Service (unless another pod needs it) and the `create_k8s_session` job.
+3. Add the sidecar to the Deployment, and the **Create API Key Secret** step with its
+   `cleanup:` before the Deployment apply; `--all-containers` on the log stream.
+4. Add `wait_for_endpoint_k8s` (copy it from any k8s YAML) and a hidden
+   `service_k8s.name` as the endpoint prefix.
+5. Hybrids: guard every cluster-only **job** with a job-level
+   `if: ${{ inputs.resource.type != 'kubernetes' }}`; a step-level guard is not enough
+   (why: [k8s-workflows.md §6](k8s-workflows.md)).
+6. Prefer a container-agnostic launch (`command:` plus the port from `image_port`) over
+   image-specific entrypoint scripts.
+7. Dry-run, run, cancel, check the namespace is empty; add the test
+   ([k8s-workflows.md §5](k8s-workflows.md)).
+
+Done 2026-09-16 for the three hybrids and the five standalone files.
 
 ## Step 5 — Test end to end (what "done" means)
 
@@ -292,8 +292,8 @@ full ask_cluster round trip).
 - `pw workflows run` uses the **stored** definition — `update` after every YAML edit.
 - Checkout `branch:` left pointing at a merged-and-deleted dev branch breaks future
   runs — flip to `main` right after merge.
-- Deleting the endpoint on k8s does NOT tear anything down — the Deployment restarts
-  the sidecar and it re-registers. Cancel the run instead.
+- On k8s, cancel the run; `pw endpoints delete` tears nothing down
+  ([k8s-workflows.md §2](k8s-workflows.md)).
 - Don't hand-verify with `--dry-run` alone; the four checks in Step 5 are the test.
 - The ttyd bundled in `downloads/vnc/noVNC-1.3.0.tgz` is a 1.7.1 fork with a
   `-R/--readonly` flag — **writable by default**, unlike upstream ttyd ≥1.7 which is
@@ -310,3 +310,60 @@ full ask_cluster round trip).
   before `pw endpoints run`) dies with the tree on `pw endpoints delete` when the
   generic trap + a `cancel.sh` (written to the script CWD with the child's PID) are
   in place — verified live with rag-service; don't rely on tree-kill alone.
+
+## Appendix — the v4 session mechanism (for reading the YAMLs you convert)
+
+Nothing in this repo uses it any more; these are the facts needed to recognise it.
+
+**Top-level `sessions:` block** — named session objects the workflow creates, referenced
+as `${{ sessions.<key> }}`:
+```yaml
+sessions:
+  session:                 # arbitrary name; reference as ${{ sessions.session }}
+    useTLS: false          # service speaks plain HTTP
+    redirect: true         # after launch, redirect the user to the Sessions page
+    # useCustomDomain: ${{ inputs.resource.type == 'kubernetes' }}  # SaaS *.activate.pw
+```
+The session is filled in at run time by the `parallelworks/update-session` action
+(target/name/slug/remoteHost/remotePort; on k8s a `targetInfo` naming a Service — Step 4)
+and reached at `https://<platform-host>/me/session/<user>/<session-name>/<slug>`, i.e.
+under a URL prefix. Apps that build absolute URLs therefore needed
+`basepath=/me/session/${PW_USER}/${{ sessions.session }}` as their base URL (JupyterLab:
+`c.ServerApp.base_url`, plus `default_url`/`static_url_prefix`), or an nginx reverse proxy
+on `${service_port}` rewriting the prefix and setting the WebSocket upgrade headers, unless
+they honoured `X-Forwarded-Prefix` (the tunnel forwarded it; verified with Hermes'
+dashboard). None of that survives the conversion: subdomain endpoints serve at the root
+("What changes conceptually").
+
+**Session name** = `<workflow-name>_<runNumber>_<sessionKey>` (the `sessions:` key is the
+trailing part) — matching the key marker was the stable way to find a workflow's sessions
+at runtime. `pw sessions ls -o json` gives per session: `name`, `status`, `targetName`
+(`<ns>/<cluster>` or `workspace`), `targetType`, `remoteHost`, `remotePort`, `localPort`,
+`openAI`, `externalHref` (the URL), `workflowRun.{name,slug,number}`.
+
+**CLI**
+```bash
+pw sessions ls [-o table|json] [-t desktop|vscode|tunnel]
+pw sessions create --type tunnel --remote-port <P> <resource> [--name N] [--open] [--connect --port <L>]
+pw sessions open <name>            # open in browser
+pw sessions connect <name>         # local port-forward
+pw sessions stop <name>            # 404s if the run was already canceled (cancel tears the session down): not an error
+```
+A running tunnel session shows `STATUS=running`, `TYPE=tunnel`, `REMOTE HOST`, `REMOTE PORT`.
+
+**`openAI: true` sessions — the v4 chat surface.** A session declared `openAI: true`
+(`redirect: false`; `detach: true` to persist past the run) registered its tunneled
+`GET /v1/models` + `POST /v1/chat/completions` service as a model in the built-in chat.
+Where it surfaced depended on where the session ran (verified): a **workspace** session
+became chat **models** (`pw ai models ls` lists `session:<user>:<session-name>/<model-id>`;
+chat via `pw ai chats` or the web UI); a **cluster** session became a chat **provider**
+(`pw ai providers ls`, `csp: openai-tunnel`; the web Chat polls its `/v1/models`) — not in
+`pw ai models ls`, and `pw ai chats` may not target it. Both worked in the built-in chat
+([Session Tunnels](https://parallelworks.com/docs/ai/ai-providers/session-tunnels)), so a
+cluster agent needed no workspace proxy. One session could expose many models (each
+`/v1/models` entry registered, and the list was re-polled); the hermes orchestrator
+advertised itself plus one `hermes-<cluster>` model per worker. A flaky agentic session
+could instead serve its own web UI (`openAI: false`, `redirect: true`), offered from one
+workflow via a `dropdown` driving the `sessions:` block. The endpoint equivalent is
+`pw endpoints run --openai` ([activate-platform.md §12](activate-platform.md)); the SSE
+framing rules there apply unchanged.

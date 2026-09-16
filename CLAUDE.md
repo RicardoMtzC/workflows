@@ -56,16 +56,23 @@ docs/                        # developer + AI docs
 
 ## The endpoint pattern
 
-Every workflow here uses it: preprocessing checks out this repo
-(`parallelworks/checkout`, sparse `workflows/<name>/app` — or an impl subdir —
-[+ `tools/...`]), assembles
+Every workflow here serves through a **`pw` endpoint** (`pw endpoints list`) named
+`<service>-${PW_RUN_SLUG}`. On a compute cluster,
+preprocessing checks out this repo (`parallelworks/checkout`, sparse
+`workflows/<name>/app` — or an impl subdir — [+ `tools/...`]), assembles
 `inputs.sh` + `controller.sh` + `start-template.sh`, submits through
-`workflows/script_submitter/v3.6/<variant>.yaml`, and waits for a **`pw` endpoint**
-(`pw endpoints list`) named `<service>-${PW_RUN_SLUG}`. No `sessions:` block.
+`workflows/script_submitter/v3.6/<variant>.yaml`, and a `wait_for_endpoint` job
+confirms the endpoint; the run then completes and the service outlives it.
 
-To convert a legacy session-pattern workflow to this pattern, follow
+**Kubernetes** (`yamls/k8s.yaml` = k8s-only example, `yamls/general_k8s.yaml` = hybrid):
+the same endpoint, registered by a `pw-cli` sidecar inside the pod; the run stays alive
+and **cancelling the run is the teardown**. Everything else Kubernetes — anatomy, dev
+loop, inputs, tests, debugging, cluster facts — is in one place:
+`.claude/skills/activate-workflows/references/k8s-workflows.md`.
+
+To convert an older workflow to this pattern, follow
 `.claude/skills/activate-workflows/references/session-to-endpoint-upgrade.md`
-(what is legacy and where it lives: MIGRATION.md).
+(which workflows those are and where they live: MIGRATION.md).
 
 ## Critical rules and conventions
 
@@ -94,7 +101,7 @@ To convert a legacy session-pattern workflow to this pattern, follow
   that full prefix, including paths composed from variables.
 - Form inputs are grouped as `cluster` (resource/scheduler) and `service`
   (service-specific); values read as `${{ inputs.cluster.* }}` / `${{ inputs.service.* }}`.
-- The hidden `service.name` input is the **endpoint/session name prefix** — it is not
+- The hidden `service.name` input is the **endpoint name prefix** — it is not
   a checkout path. Keep its value stable; renaming it changes endpoint names.
 - Endpoint names must be lowercase `[a-z0-9-]`. `<service.name>-${PW_RUN_SLUG}` already
   is; a name that comes from a form input must be folded before it reaches
@@ -130,6 +137,10 @@ those platforms — validate them statically.
   and its URL answers. The run completes while the service keeps running.
 - **Tear down:** `pw endpoints delete <name>` kills the remote process tree; verify
   with `ps -x` (daemonizing apps that re-parent to PID 1 can survive).
+- **Kubernetes runs differ:** pass = the endpoint is listed and answers while the run is
+  still `running`; teardown = `pw workflows runs cancel <slug>`. The runner's k8s lane
+  does both (tests under `tests/k8s/` and `tests/general_k8s/`); details in
+  `.claude/skills/activate-workflows/references/k8s-workflows.md` §4–§6.
 - **Verify cancel cleanup when developing a workflow:** cancel a run mid-flight
   (`pw workflows runs cancel <slug>`) and confirm `cancel.sh` ran — no leftover
   processes (`ps -x`), scheduler jobs (`squeue`/`qstat`), or container instances
@@ -141,7 +152,8 @@ those platforms — validate them statically.
   `run.<JOBID>.out` is the service output; `logs/<job>/step_N/step.out` the step
   trace; `logs/<job>/step_N/script-unstable.sh` is the **rendered** step showing every
   `${{ input }}` as its literal value — read it first when a form value seems ignored.
-  From anywhere: `pw workflows runs errors <slug>`.
+  From anywhere: `pw workflows runs errors <slug>`. Kubernetes runs have no job dir on
+  a cluster node — debug them per `.claude/skills/activate-workflows/references/k8s-workflows.md` §6.
 - `pw` auth tokens expire; "Authentication has expired" means a human must run `pw auth`.
 - Registered ("remote") workflows pin one YAML path (`pw workflows get <name>` →
   `remote.yaml`); the form and its defaults come from that file — point registrations
