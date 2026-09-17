@@ -40,11 +40,11 @@ fabric:
   - mpich
   - intel-oneapi-mpi
   gromacs_specs:
-  - gromacs@2024.3 +mpi +openmp ~cuda ^openmpi ^fftw+openmp
-  - gromacs@2024.3 +mpi +openmp ~cuda ^mpich ^fftw+openmp
-  - gromacs@2024.3 +mpi +openmp ~cuda ^intel-oneapi-mpi ^fftw+openmp
+  - gromacs@2025.4 +mpi +openmp ~cuda ^openmpi ^fftw+openmp
+  - gromacs@2025.4 +mpi +openmp ~cuda ^mpich ^fftw+openmp
+  - gromacs@2025.4 +mpi +openmp ~cuda ^intel-oneapi-mpi ^fftw+openmp
   cuda_aware_mpi_specs:
   - openmpi +cuda schedulers=slurm fabrics=ucx ^ucx@1.17.0 +verbs +rdmacm +dc +cuda +gdrcopy ^rdma-core
     ^cuda
   gromacs_gpu_specs:
-  - gromacs@2024.3 +mpi +openmp +cuda cuda_arch=__CUDA_ARCH__ ^openmpi+cuda ^cuda ^fftw+openmp
+  - gromacs@2025.4 +mpi +openmp +cuda cuda_arch=__CUDA_ARCH__ ^openmpi+cuda ^cuda ^fftw+openmp

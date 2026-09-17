@@ -254,10 +254,18 @@ if ! spack -e "$ENV_DIR" install --no-check-signature -j"$JOBS" 2>&1 | tee "$INS
   # this, every compile failure costs a round trip to the cluster to learn which
   # header was missing.
   log "::error title=Error::spack install failed; tails of the failing build logs follow"
-  grep -oE 'See build log for details: .*' "$INSTALL_LOG" | awk '{print $NF}' | sort -u |
-  while read -r build_log; do
-    printf '\n----- last 80 lines of %s -----\n' "$build_log"
-    tail -n 80 "$build_log" 2>/dev/null || echo "(build log not readable)"
+  # Spack names the failing logs in TWO formats and this has to catch both. A
+  # single-package failure prints "See build log for details: <path>"; a
+  # multi-package one prints a block of "<spec>/<hash>: <path>" under "The
+  # following packages failed to install:". Matching only the first meant that on
+  # gce2 run funky-pigeon -- gdrcopy and gromacs, the exact case this was written
+  # for -- the loop found nothing and printed nothing at all.
+  {
+    grep -oE 'See build log for details: .*' "$INSTALL_LOG" | awk '{print $NF}'
+    grep -oE '^[^ ]+@[^ ]+/[^ :]+: +/[^ ]+\.log$' "$INSTALL_LOG" | awk '{print $NF}'
+  } | sort -u | while read -r build_log; do
+    printf '\n----- last 120 lines of %s -----\n' "$build_log"
+    tail -n 120 "$build_log" 2>/dev/null || echo "(build log not readable)"
   done
   exit 1
 fi

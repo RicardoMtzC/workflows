@@ -86,6 +86,24 @@ def main(argv):
     env["spack"]["packages"] = merge_packages(env["spack"].get("packages", {}),
                                               frag.get("packages", {}))
 
+    # cuda_arch has to reach EVERY package that consumes CUDA, not only the ones
+    # a spec string names. Setting it per-spec covered gromacs and missed the
+    # transitive ones: on gce2 run funky-pigeon, ucx and gdrcopy concretized with
+    # `cuda_arch:=none` because nothing named them, and gdrcopy's build then ran
+    #   nvcc --generate-code arch=compute_none,code=sm_none
+    #   nvcc fatal : Unsupported gpu architecture 'compute_none'
+    # after 1h28m of compiling. A preference under `packages: all:` applies to
+    # any package that HAS the variant and leaves the rest untouched, which is
+    # the only place that reaches a dependency no spec mentions.
+    if gpu_active and cuda_arch:
+        all_cfg = env["spack"]["packages"].setdefault("all", {})
+        existing = all_cfg.get("variants", "")
+        if isinstance(existing, list):
+            all_cfg["variants"] = existing + ["cuda_arch=%s" % cuda_arch]
+        else:
+            all_cfg["variants"] = (existing + " " if existing else "") + \
+                                  "cuda_arch=%s" % cuda_arch
+
     # The stack compiler is written down only in the template. Report it so the
     # caller can install and register it before concretizing -- `spack python -c`
     # takes a single statement, so a multi-line inline reader is not an option.
@@ -95,8 +113,9 @@ def main(argv):
     with open(out_path, "w") as f:
         yaml.safe_dump(env, f, default_flow_style=False, sort_keys=False, width=100)
 
-    print("rendered %s: target=%s gpu=%s specs=%d"
-          % (out_path, target, gpu_active, len(env["spack"]["specs"])))
+    print("rendered %s: target=%s gpu=%s cuda_arch=%s specs=%d"
+          % (out_path, target, gpu_active, cuda_arch if gpu_active else "n/a",
+             len(env["spack"]["specs"])))
     print("GCC_SPEC=%s" % gcc_spec)
 
 

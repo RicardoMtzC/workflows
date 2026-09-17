@@ -15,7 +15,7 @@ endpoint is a placeholder serving an empty page — see
 |---|---|
 | Compiler | `gcc@14.2.0`, built with the system compiler, then used for everything else |
 | MPIs | `openmpi@5.0.10`, `mpich@4.2.2`, `intel-oneapi-mpi@2021.13.0` |
-| Applications | `gromacs@2024.3`, one build per MPI |
+| Applications | `gromacs@2025.4`, one build per MPI |
 | Validation | `osu-micro-benchmarks`, one build per MPI |
 | Optional GPU path | CUDA-aware `openmpi+cuda` and `gromacs+cuda` |
 
@@ -133,7 +133,9 @@ held nothing but a copied `spack-buildcache`, and `${HOME}/spack` and
 
 Afterwards all three MPIs load with a working `mpirun` and
 `gromacs/2024.3-openmpi-5.0.10` reports `2024.3-spack` — from binaries alone, on a
-machine that had no Spack on it ten minutes earlier.
+machine that had no Spack on it ten minutes earlier. (That run predates the
+GROMACS 2025.4 bump below, so its cached GROMACS specs no longer apply; the
+measurement of what a warm cache is worth still stands.)
 
 Note the install paths contain literal `__spack_path_placeholder__` components.
 That is the `padded_length: 128` padding on disk, not a relocation failure; it is
@@ -198,7 +200,8 @@ The OSU binaries install under `libexec/osu-micro-benchmarks/mpi/...`, not `bin`
 so they are not placed on `PATH` by design.
 
 Verified on this cluster: all three MPIs run `osu_latency` (0.25-0.56 us
-intra-node) and all three GROMACS builds report `2024.3-spack`.
+intra-node) and all three GROMACS builds report `2024.3-spack` — measured before
+the 2025.4 bump.
 
 Launcher note: OpenMPI 5 dropped the `pmi` and `legacylaunchers` variants, and
 this stack does not assume a PMIx plugin in Slurm. Check `srun --mpi=list` on your
@@ -236,13 +239,33 @@ tests/general/            recorded end-to-end test
 
 ## Known gaps and deferred work
 
+- **GROMACS is 2025.4 because 2024.3 does not link against CUDA 13.** Verified on
+  gce2 run `funky-pigeon`: GROMACS compiled with the right architecture
+  (`compute_90`/`sm_90`) and then failed at link with a single unresolved symbol,
+  its own `__global__` function template instantiation —
+  `undefined reference to void nbnxn_kernel_prune_cuda<false>(...)` plus
+  `relocation R_X86_64_PC32 against undefined hidden symbol`. No library was
+  missing; nvcc 13.2 emits such instantiations as hidden stubs the host
+  translation unit cannot reference. Spack cannot warn about this: the package
+  declares `depends_on("cuda", when="+cuda")` with **no upper bound**, so any
+  GROMACS pairs with any CUDA and the mismatch appears only after the whole CPU
+  stack has built (1h28m in that run). Both 2025.4 specs, CPU and GPU, were
+  checked with `spack spec` before committing.
+- **`cuda_arch` is set once under `packages: all: variants`, not per spec.** Only
+  packages that *have* the variant pick it up. Setting it per-spec reached
+  `gromacs` and missed everything transitive: in the same run `ucx` and `gdrcopy`
+  concretized with `cuda_arch:=none`, and gdrcopy ran
+  `nvcc --generate-code arch=compute_none,code=sm_none` → `nvcc fatal :
+  Unsupported gpu architecture 'compute_none'`. One consequence worth knowing:
+  inside a GPU run the CPU GROMACS specs also carry `cuda_arch`, so their hashes
+  differ from the same specs built by a CPU-only run and the two cannot share
+  cache entries. CPU-only runs are untouched — the key is only added when the GPU
+  path is active.
 - **GPU detection works; the GPU build has still not been run end to end.**
   Verified on gce2 (run `loving-firefly`): the inspection job reports
   `2x NVIDIA H100 80GB HBM3`, `cuda_arch=90`, driver `595.45.04`, driver CUDA
   `13.2`, toolkit `nvcc 13.2`. What is still unverified is everything after that
-  — whether `openmpi+cuda` and `gromacs@2024.3 +cuda` concretize and build
-  against **CUDA 13.2**, which is newer than anything GROMACS 2024.3 was released
-  against. Note also that the aws `gpu` partition advertises `Gres=(null)`, so a
+  — whether `openmpi+cuda` and `gromacs +cuda` build against **CUDA 13.2**. Note also that the aws `gpu` partition advertises `Gres=(null)`, so a
   `--gpus=` request there has nothing to bind to; gce2 does advertise its GPUs.
   Run `moral-ghost` was the first to reach the CUDA registration and found a
   second latent bug there: `spack config add "packages:cuda:externals:[{spec: …}]"`
