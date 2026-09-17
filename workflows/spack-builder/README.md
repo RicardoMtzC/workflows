@@ -40,8 +40,10 @@ decision explicit:
   they just leave its newer instructions unused. Build on a worker node if that
   last few percent matters.
 
-Verified on this cluster: login node `skylake_avx512`, workers `cascadelake` — the
-fallback case.
+Both cases have been seen on the same `aws` cluster across rebuilds: login node
+`skylake_avx512` with `cascadelake` workers (the fallback), and — after the
+cluster was rebuilt with `c5n.9xlarge` in the `cpu` partition — login and workers
+both `skylake_avx512` (the exact case, run `charming-mongoose`).
 
 ## Fabric handling
 
@@ -98,6 +100,28 @@ Two things to know before shipping one:
   leaves a hole where the slowest package should be). Intel oneAPI has
   redistribution terms, so keep such an archive in a private bucket, or push
   without `--private` to omit it.
+
+## Redeployment: what a warm cache is worth
+
+Measured on `aws`, run `charming-mongoose` (recorded as
+`tests/general/buildcache-redeploy.json`). The cluster had been rebuilt, `${HOME}`
+held nothing but a copied `spack-buildcache`, and `${HOME}/spack` and
+`${HOME}/.spack` were deleted before the run:
+
+| | |
+|---|---|
+| Whole run, submission to endpoint | **7 min 43 s** |
+| Cache forecast after concretization | 66 of 66 buildable specs cached, 4 external |
+| What the install did | 36 specs from the build cache, **0 compiled from source** |
+| Against a cold build of the same stack | ~1.6 h at `-j8` |
+
+Afterwards all three MPIs load with a working `mpirun` and
+`gromacs/2024.3-openmpi-5.0.10` reports `2024.3-spack` — from binaries alone, on a
+machine that had no Spack on it ten minutes earlier.
+
+Note the install paths contain literal `__spack_path_placeholder__` components.
+That is the `padded_length: 128` padding on disk, not a relocation failure; it is
+exactly what makes the cache relocatable into a different root.
 
 ## Build times (rule of thumb)
 
@@ -260,6 +284,36 @@ needed to explain a build are printed rather than left on the node:
 | Which hardware did the stack get built for? | `detect-fabric.sh` echoes the resolved `fabric.env`; `build.sh` prints the profile and the target decision |
 | Why did a package fail to compile? | `build.sh` inlines the last 80 lines of each failing package's Spack build log, which otherwise only exists on the node |
 | Did the build actually succeed? | `BUILD_STATUS` + the `verify` job. `script_submitter`'s unscheduled path detaches the script and polls `kill -0`, so it sees that the process ended but never its exit status |
+
+### Reading the logs
+
+```bash
+pw workflows runs logs   <slug>            # everything, in order
+pw workflows runs logs   <slug> --failed   # only failed steps
+pw workflows runs errors <slug> -o text
+```
+
+**`--job build` matches nothing.** A submitted script's output is not filed under
+the job name in this YAML: `script_submitter` contributes its own job names, so
+everything the three submitted scripts print appears under `preprocessing`,
+`slurm_job`, `ssh_job` and `stream_output` — and all three submissions share
+them. Read the unfiltered log and search for the `=== [controller] ===`,
+`=== [detect] ===` and `=== [build] ===` banners instead.
+
+On the node, each submitted job gets its own directory under the run dir:
+
+```
+~/pw/jobs/<slug>/           inputs.sh, fabric.env, spack-env/, the assembled scripts
+~/pw/jobs/<slug>/detect/    run.<JOBID>.out of the hardware probe
+~/pw/jobs/<slug>/build/     run.<JOBID>.out of the build, spack-install.log, BUILD_STATUS
+~/pw/jobs/<slug>/endpoint/  run.<JOBID>.out of the placeholder endpoint, endpoint-root/
+```
+
+They must stay separate: `script_submitter` streams to `run.${PW_JOB_ID}.out`
+and all three submissions of a run carry the **same** `PW_JOB_ID`, so one shared
+directory means each job truncates the previous one's log. That is how the aws
+run `charming-mongoose` lost its entire build log to the endpoint job, leaving
+the platform-side log as the only copy.
 
 The integrity check compares **sizes**, not checksums: hashing a 1.4 GiB cache
 on every run costs minutes, and the failure it guards against — an interrupted

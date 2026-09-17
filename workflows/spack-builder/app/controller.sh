@@ -56,7 +56,8 @@ done | sort -u
 if [ ! -d "$SPACK_ROOT/.git" ]; then
   log "Cloning Spack $SPACK_VERSION -> $SPACK_ROOT"
   mkdir -p "$(dirname "$SPACK_ROOT")"
-  git clone -c feature.manyFiles=true --depth 1 --branch "$SPACK_VERSION" \
+  git clone -c feature.manyFiles=true -c advice.detachedHead=false \
+      --quiet --depth 1 --branch "$SPACK_VERSION" \
       https://github.com/spack/spack.git "$SPACK_ROOT"
 else
   # Compare commits, not `git describe` output: several tags can point at the
@@ -92,7 +93,15 @@ esac
 #    and off whatever node runs detection or the build.
 # ---------------------------------------------------------------------------
 log "Warming the package repository"
-spack list --count >/dev/null
+# Spack clones spack-packages here (20k objects). Git writes a progress line per
+# percent to stderr even with no TTY, and those ~200 lines are the bulk of this
+# job's log -- they bury the externals, the compiler and the cache inventory
+# that a reader actually came for. Keep them, but only show them if it fails.
+if ! spack list --count >/dev/null 2>package-repo.log; then
+  echo "::error title=Error::could not fetch the Spack package repository" >&2
+  tail -n 40 package-repo.log >&2
+  exit 1
+fi
 spack repo list
 
 # ---------------------------------------------------------------------------

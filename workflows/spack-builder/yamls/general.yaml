@@ -243,6 +243,9 @@ jobs:
       remoteHost: ${{ inputs.cluster.resource.ip }}
     outputs:
       RUNDIR: ${{ needs.preprocess.steps.assemble.outputs.RUNDIR }}
+      DETECT_DIR: ${{ needs.preprocess.steps.assemble.outputs.DETECT_DIR }}
+      BUILD_DIR: ${{ needs.preprocess.steps.assemble.outputs.BUILD_DIR }}
+      ENDPOINT_DIR: ${{ needs.preprocess.steps.assemble.outputs.ENDPOINT_DIR }}
       DETECT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.DETECT_SCRIPT }}
       BUILD_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.BUILD_SCRIPT }}
       ENDPOINT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.ENDPOINT_SCRIPT }}
@@ -315,9 +318,21 @@ jobs:
                "${PWD}/profile.decision" "${PWD}/fabric.env"
           . "${PWD}/profile.decision"
           echo "NEED_DETECT=${NEED_DETECT}" | tee -a $OUTPUTS
-          # Both submitted jobs must land in THIS directory: it holds inputs.sh,
-          # fabric.env and the checked-out app/ tree.
           echo "RUNDIR=${PWD}" | tee -a $OUTPUTS
+
+          # One run directory per submitted job. They must NOT share one:
+          # script_submitter streams its script's output to run.${PW_JOB_ID}.out
+          # in its rundir, and all three submissions of a run carry the same
+          # PW_JOB_ID -- so a shared directory means the endpoint job truncates
+          # the build log that explains the build. (Observed on aws run
+          # charming-mongoose: the whole install was gone from the node, and the
+          # only surviving copy was the platform-side log.) The scripts
+          # themselves are unaffected: every path they use -- inputs.sh,
+          # fabric.env, spack-env, app/ -- is absolute and still points here.
+          mkdir -p "${PWD}/detect" "${PWD}/build" "${PWD}/endpoint"
+          echo "DETECT_DIR=${PWD}/detect" | tee -a $OUTPUTS
+          echo "BUILD_DIR=${PWD}/build" | tee -a $OUTPUTS
+          echo "ENDPOINT_DIR=${PWD}/endpoint" | tee -a $OUTPUTS
 
           # script_submitter runs an existing script, so each one is inputs.sh
           # concatenated with its body. Note this puts the script in the run
@@ -370,7 +385,7 @@ jobs:
           $yaml: workflows/script_submitter/v3.6/general.yaml
           resource: ${{ inputs.cluster.resource }}
           shebang: '#!/bin/bash'
-          rundir: ${{ needs.preprocess.outputs.RUNDIR }}
+          rundir: ${{ needs.preprocess.outputs.DETECT_DIR }}
           use_existing_script: true
           script_path: ${{ needs.preprocess.outputs.DETECT_SCRIPT }}
           define_cleanup_script: true
@@ -407,7 +422,7 @@ jobs:
           $yaml: workflows/script_submitter/v3.6/general.yaml
           resource: ${{ inputs.cluster.resource }}
           shebang: '#!/bin/bash'
-          rundir: ${{ needs.preprocess.outputs.RUNDIR }}
+          rundir: ${{ needs.preprocess.outputs.BUILD_DIR }}
           use_existing_script: true
           script_path: ${{ needs.preprocess.outputs.BUILD_SCRIPT }}
           define_cleanup_script: true
@@ -439,11 +454,11 @@ jobs:
       - name: Confirm the build succeeded
         run: |
           set -uo pipefail
-          STATUS_FILE="${{ needs.preprocess.outputs.RUNDIR }}/BUILD_STATUS"
+          STATUS_FILE="${{ needs.preprocess.outputs.BUILD_DIR }}/BUILD_STATUS"
           st="$(cat "${STATUS_FILE}" 2>/dev/null || echo missing)"
           echo "build.sh exit status: ${st}"
           if [ "${st}" != "0" ]; then
-            echo "::error title=Error::Build failed (status '${st}'). See run.*.out in ${{ needs.preprocess.outputs.RUNDIR }}"
+            echo "::error title=Error::Build failed (status '${st}'). See run.*.out in ${{ needs.preprocess.outputs.BUILD_DIR }}"
             exit 1
           fi
           echo "::notice::Build completed successfully"
@@ -456,9 +471,9 @@ jobs:
   #    that serves nothing cannot be tested by it. Serving an empty page is the
   #    smaller change -- see README.md, "The placeholder endpoint".
   #
-  #    It shares the run directory (and therefore ./cancel.sh) with the build
-  #    job. That is safe only because `needs: verify` makes them sequential: the
-  #    build's cancel.sh has already done its work before this one overwrites it.
+  #    It runs in its own directory under the run dir, like every other
+  #    submitted job here, so its ./cancel.sh and its run.<JOBID>.out cannot
+  #    collide with the build's.
   # -------------------------------------------------------------------------
   endpoint:
     needs:
@@ -472,7 +487,7 @@ jobs:
           $yaml: workflows/script_submitter/v3.6/general.yaml
           resource: ${{ inputs.cluster.resource }}
           shebang: '#!/bin/bash'
-          rundir: ${{ needs.preprocess.outputs.RUNDIR }}
+          rundir: ${{ needs.preprocess.outputs.ENDPOINT_DIR }}
           use_existing_script: true
           script_path: ${{ needs.preprocess.outputs.ENDPOINT_SCRIPT }}
           define_cleanup_script: true
