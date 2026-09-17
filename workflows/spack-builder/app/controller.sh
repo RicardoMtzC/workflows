@@ -110,6 +110,17 @@ spack external find --scope site libfabric ucx || true
 # concretize.
 spack external find --scope site gmake || true
 
+# Drop any external that has libraries but no headers. `external find` detects a
+# package from its libraries, but Spack then compiles against it -- and an image
+# that ships the runtime without the -devel package yields an external that looks
+# valid and fails at configure time. Seen three times now (slurm, rdma-core,
+# libfabric), and it is image-specific: the AWS EFA libfabric under
+# /opt/amazon/efa has headers, the GCE /usr one does not. So it must be probed
+# here rather than decided in a fabric fragment.
+log "Pruning externals that lack development headers"
+spack python "$APP_DIR/prune-headerless-externals.py" \
+    "$SPACK_ROOT/etc/spack/site/packages.yaml" 
+
 # ---------------------------------------------------------------------------
 # 4. System compiler. This is only the bootstrap compiler: it builds the stack
 #    compiler that spack.yaml requires. build.sh registers that one afterwards.
