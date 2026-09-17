@@ -44,6 +44,12 @@ printf 'host           : %s\n' "$(hostname)"
 printf 'os / kernel    : %s / %s\n' \
        "$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")" "$(uname -r)"
 printf 'cores / memory : %s / %s\n' "$(nproc)" "$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')"
+# The CPU model, because the build host's microarchitecture decides what the
+# whole stack is compiled for. Without it, "can this login node emit the compute
+# nodes' target?" is answered by looking up instance-type trivia instead of by
+# reading the log -- and an Intel login node with AMD compute nodes is the case
+# that silently produces binaries that SIGILL (see resolve-target.py).
+printf 'cpu            : %s\n' "$(lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | head -1)"
 printf 'spack root     : %s\n' "$SPACK_ROOT"
 printf 'build cache    : %s\n' "$BUILDCACHE_PATH"
 for _p in "$HOME" "$(dirname "$SPACK_ROOT")" "$BUILDCACHE_PATH"; do
@@ -79,7 +85,7 @@ fi
 # shellcheck disable=SC1091
 . "$SPACK_ROOT/share/spack/setup-env.sh"
 SPACK_SEEN="$(spack --version)"
-log "Spack version: $SPACK_SEEN"
+log "Spack version: $SPACK_SEEN (build host target: $(spack arch -t 2>/dev/null || echo unknown))"
 
 case "$SPACK_SEEN" in
   1.*) : ;;

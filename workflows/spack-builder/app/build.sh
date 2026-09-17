@@ -78,10 +78,18 @@ log "Fabric profile: $FABRIC_PROFILE (cloud=${CLOUD:-?}, detected on ${DETECT_HO
 # an unsupported target is silently dropped rather than rejected -- resolve-target.py
 # makes that decision explicit and loud. See its docstring for the two directions.
 WANTED_TARGET="${OVERRIDE_TARGET:-${BUILD_TARGET:-}}"
-eval "$(spack python "$APP_DIR/resolve-target.py" "$WANTED_TARGET")"
+# Captured rather than `eval "$(...)"`: the resolver now exits non-zero when no
+# target can serve both machines, and a command substitution inside eval swallows
+# that -- eval would succeed on empty output and leave TARGET unset.
+if ! TARGET_RESOLUTION="$(spack python "$APP_DIR/resolve-target.py" "$WANTED_TARGET")"; then
+  echo "::error title=Error::cannot choose a build target for compute node '${WANTED_TARGET}' from this build host" >&2
+  exit 1
+fi
+eval "$TARGET_RESOLUTION"
 case "$TARGET_STATUS" in
   exact)    log "Target: $TARGET (matches compute node ${DETECT_HOST:-?})" ;;
   fallback) log "::warning::Target: $TARGET -- $TARGET_NOTE" ;;
+  common)   log "::warning::Target: $TARGET -- $TARGET_NOTE" ;;
   host)     log "::warning::Target: $TARGET -- $TARGET_NOTE" ;;
 esac
 

@@ -33,12 +33,28 @@ host can run, and `packages: all: target:` is a *preference*, so an unsupported
 target is silently dropped rather than rejected. `app/resolve-target.py` makes the
 decision explicit:
 
-- **Worker target is older than the login node** → build exactly for the worker.
-- **Worker target is newer than the login node** → the login node cannot emit it.
-  The build falls back to the login node's own target and says so loudly. Those
-  binaries still *run* on the worker (a newer microarchitecture is a superset);
-  they just leave its newer instructions unused. Build on a worker node if that
-  last few percent matters.
+- **Worker target is older than the login node** → build exactly for the worker
+  (`exact`).
+- **Worker target is newer, same lineage** (skylake_avx512 → cascadelake) → the
+  login node cannot emit it, so the build falls back to the login node's own
+  target and says so loudly (`fallback`). Those binaries still *run* on the
+  worker — a newer microarchitecture on the same lineage is a superset; they just
+  leave its newer instructions unused. Build on a worker node if that last few
+  percent matters.
+- **The two are incomparable — different vendors** → neither target works, and
+  falling back to the login node's would be silently wrong. The build targets the
+  best **common ancestor** instead (`common`).
+- **Different CPU family** (x86_64 login, aarch64 workers) → no target serves
+  both, so the build **fails** rather than producing binaries that cannot run.
+
+The third case is not hypothetical and is the one that bites. On `aws` the login
+node is a `c5n.9xlarge` (Intel `skylake_avx512`) while the GPU partitions are
+`g6`/`g5` — AMD EPYC, `zen3`. AVX-512 is not a *subset* of zen3, it is **absent**
+from it, so a `skylake_avx512` build would SIGILL on those nodes. Checked with
+archspec on the login node: `zen3 <= skylake_avx512` and `skylake_avx512 <= zen3`
+are **both** false. The resolver now picks `x86_64_v3` for that pair — the most
+capable target both machines implement — and `zen4`/`skylake_avx512` resolves to
+`x86_64_v4`.
 
 Both cases have been seen on the same `aws` cluster across rebuilds: login node
 `skylake_avx512` with `cascadelake` workers (the fallback), and — after the
@@ -220,8 +236,23 @@ tests/general/            recorded end-to-end test
 
 ## Known gaps and deferred work
 
-- The GPU path has not been run: this cluster has no GPUs. CUDA/driver/GCC
-  compatibility on a real GPU node is unverified.
+- **The GPU path has still not been run end to end.** An attempt on the `aws`
+  `gpu` partition (`g6.12xlarge`, NVIDIA L4) could not get a node — the cloud had
+  no capacity — so CUDA/driver/GCC compatibility remains unverified. Two things
+  to expect when it does run: the partition advertises `Gres=(null)`, so ask for
+  `gpus: 0` and let the partition guarantee the hardware rather than requesting a
+  GRES that SLURM does not know about; and the image ships **CUDA 13.2**, which
+  is newer than anything GROMACS 2024.3 was released against.
+- **The `common` target branch is unit-tested, not run.** Every branch of
+  `resolve-target.py` was exercised against archspec on the aws login node
+  (`zen3`→`x86_64_v3`, `zen4`→`x86_64_v4`, `cascadelake`→fallback,
+  `skylake`→exact, `neoverse_v1`→error), but no build has yet been produced
+  through it, because that needs an AMD compute node.
+- **The gce2 redeploy is recorded as a failure, not a verdict on the workflow.**
+  Run `creative-rat` never got a compute node (1h38m in `CF`) and was cancelled.
+  What it did establish, from the controller log alone, is that the gce2 build
+  cache is *intact but incomplete*: 35 specs, 872 MiB, all blobs present and the
+  right size, containing `gcc` and its build closure and nothing above it.
 - The PBS path is untested.
 - Heterogeneous clusters need one run per node type; the design assumes one
   representative worker.
