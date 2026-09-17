@@ -4,7 +4,8 @@
 # with an optional GPU path, and publishes everything to a binary build cache.
 #
 # This is a BUILD workflow, not an endpoint service: it runs to completion and
-# exits. It registers no pw endpoint and opens no session.
+# exits. The pw endpoint it registers at the end serves an empty page and exists
+# only to satisfy the shared end-to-end test runner (README.md).
 #
 # Flow:
 #   preprocess -> checkout app/, write inputs.sh, bootstrap Spack + build cache
@@ -14,6 +15,11 @@
 #                 reports its fabric, GPU and microarchitecture into fabric.env
 #   build      -> script_submitter, scheduler=false: runs on the LOGIN node,
 #                 which has internet for source fetches and no queue walltime
+#   verify     -> turn a failed build into a failed run
+#   endpoint   -> a placeholder pw endpoint, and wait_for_endpoint to release the
+#                 run once it is up. The build needs neither; they exist so the
+#                 shared end-to-end test runner, which demands an endpoint, can
+#                 test this workflow at all. See README.md.
 #
 # Why detection and the build run in different places: the login node is
 # routinely a different instance type from the compute nodes, so the stack has to
@@ -239,6 +245,8 @@ jobs:
       RUNDIR: ${{ needs.preprocess.steps.assemble.outputs.RUNDIR }}
       DETECT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.DETECT_SCRIPT }}
       BUILD_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.BUILD_SCRIPT }}
+      ENDPOINT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.ENDPOINT_SCRIPT }}
+      SKIP_CLEANUP_PATH: ${{ needs.preprocess.steps.assemble.outputs.SKIP_CLEANUP_PATH }}
       NEED_DETECT: ${{ needs.preprocess.steps.assemble.outputs.NEED_DETECT }}
     steps:
       - name: Checkout workflow app
@@ -263,6 +271,7 @@ jobs:
           fabric_env="${PWD}/fabric.env"
           env_dir="${PWD}/spack-env"
           service_name="${{ inputs.service.name }}"
+          pw_endpoints_args="--name ${{ inputs.service.name }}-${PW_RUN_SLUG}"
           service_spack_version="${{ inputs.service.spack_version }}"
           service_install_prefix="${{ inputs.service.install_prefix }}"
           service_buildcache_path="${{ inputs.service.buildcache_path }}"
@@ -321,6 +330,29 @@ jobs:
           cp inputs.sh build-${PW_JOB_ID}.sh
           cat "workflows/spack-builder/app/build.sh" >> build-${PW_JOB_ID}.sh
           echo "BUILD_SCRIPT=${PWD}/build-${PW_JOB_ID}.sh" | tee -a $OUTPUTS
+
+          # The placeholder endpoint. The trap wrapper is the one every service
+          # workflow here uses: it runs cancel.sh once and then kills the process
+          # group, which is what makes `pw endpoints delete` on teardown reliable.
+          cp inputs.sh endpoint-${PW_JOB_ID}.sh
+          cat <<'EOF' >> endpoint-${PW_JOB_ID}.sh
+
+          cleanup() {
+              trap - EXIT INT TERM HUP QUIT USR1 USR2 PIPE
+              echo "::notice::Cleaning up..."
+              if [ -f cancel.sh ]; then
+                  mv cancel.sh cancel.sh.submitted
+                  echo "echo Cleanup script was already executed" > cancel.sh
+                  bash cancel.sh.submitted
+              fi
+              kill -- -$$
+          }
+
+          trap cleanup EXIT INT TERM HUP QUIT USR1 USR2 PIPE
+          EOF
+          cat "workflows/spack-builder/app/start-template.sh" >> endpoint-${PW_JOB_ID}.sh
+          echo "ENDPOINT_SCRIPT=${PWD}/endpoint-${PW_JOB_ID}.sh" | tee -a $OUTPUTS
+          echo "SKIP_CLEANUP_PATH=${PWD}/SKIP_CLEANUP" | tee -a $OUTPUTS
 
   # -------------------------------------------------------------------------
   # 2. Inspect the compute hardware. Skipped entirely when complete overrides
@@ -415,3 +447,82 @@ jobs:
             exit 1
           fi
           echo "::notice::Build completed successfully"
+
+  # -------------------------------------------------------------------------
+  # 5. Serve a placeholder endpoint.
+  #    Nothing in the build needs this. The shared test runner
+  #    (tools/tests/run-workflow-test.py) passes a run only when an endpoint
+  #    named <service.name>-<run-slug> is listed and answers HTTP, so a workflow
+  #    that serves nothing cannot be tested by it. Serving an empty page is the
+  #    smaller change -- see README.md, "The placeholder endpoint".
+  #
+  #    It shares the run directory (and therefore ./cancel.sh) with the build
+  #    job. That is safe only because `needs: verify` makes them sequential: the
+  #    build's cancel.sh has already done its work before this one overwrites it.
+  # -------------------------------------------------------------------------
+  endpoint:
+    needs:
+      - preprocess
+      - verify
+    steps:
+      - name: Serve the placeholder endpoint
+        uses: github/parallelworks/workflows@add-spack-builder
+        early-cancel: any-job-failed
+        with:
+          $yaml: workflows/script_submitter/v3.6/general.yaml
+          resource: ${{ inputs.cluster.resource }}
+          shebang: '#!/bin/bash'
+          rundir: ${{ needs.preprocess.outputs.RUNDIR }}
+          use_existing_script: true
+          script_path: ${{ needs.preprocess.outputs.ENDPOINT_SCRIPT }}
+          define_cleanup_script: true
+          cleanup_script_path: ./cancel.sh
+          scheduler: false
+          use_scheduler_agent: false
+          submit_and_exit: false
+          skip_cleanups_file: ${{ needs.preprocess.outputs.SKIP_CLEANUP_PATH }}
+          slurm:
+            is_enabled: false
+          pbs:
+            is_enabled: false
+      - name: Cancel Wait for Endpoint
+        uses: parallelworks/cancel-jobs
+        with:
+          jobs:
+            - wait_for_endpoint
+      - name: Exit Workflow with Error
+        run: |
+          echo "::error title=Error::The placeholder endpoint never came online"
+          exit 1
+
+  # -------------------------------------------------------------------------
+  # 6. Release the run once the endpoint answers, and leave it serving.
+  #    Touching SKIP_CLEANUP tells script_submitter not to run cancel.sh when
+  #    the job is cancelled, so the endpoint outlives the run -- which is what
+  #    the test runner checks before deleting it itself.
+  # -------------------------------------------------------------------------
+  wait_for_endpoint:
+    needs:
+      - preprocess
+      - verify
+    ssh:
+      remoteHost: ${{ inputs.cluster.resource.ip }}
+    steps:
+      - name: Wait for endpoint
+        early-cancel: any-job-failed
+        run: |
+          command -v pw >/dev/null 2>&1 || export PATH="${PATH}:${HOME}/pw"
+          endpoint_name="${{ inputs.service.name }}-${PW_RUN_SLUG}"
+          echo "::notice::Waiting for endpoint ${endpoint_name} to come online"
+          until pw endpoints list | grep -qw "${endpoint_name}"; do
+            echo "$(date) Endpoint ${endpoint_name} not found yet; retrying in 10 seconds"
+            sleep 10
+          done
+          echo "::notice::Endpoint ${endpoint_name} is online"
+          touch ${{ needs.preprocess.outputs.SKIP_CLEANUP_PATH }}
+          sleep 2
+      - name: Cancel Script Submitter
+        uses: parallelworks/cancel-jobs
+        with:
+          jobs:
+            - endpoint

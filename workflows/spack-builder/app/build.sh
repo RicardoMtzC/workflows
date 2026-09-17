@@ -41,7 +41,8 @@ log() { printf '\n=== [build] %s ===\n' "$*"; }
 # steps, and the platform still recorded the run as completed.
 BUILD_STATUS_FILE="${PWD}/BUILD_STATUS"
 rm -f "$BUILD_STATUS_FILE"
-trap 'printf "%s\n" "$?" > "$BUILD_STATUS_FILE"' EXIT
+trap 'rc=$?; printf "%s\n" "$rc" > "$BUILD_STATUS_FILE";
+      [ "$rc" -eq 0 ] || echo "::error title=Error::build.sh exited $rc -- see the last === [build] === section above for the step that failed"' EXIT
 
 # ---------------------------------------------------------------------------
 # 0. Cancellation hook, written FIRST so a cancel at any later moment finds it.
@@ -137,7 +138,11 @@ gcc_built_prefix() {
 if [ -z "$(gcc_built_prefix)" ]; then
   log "Installing stack compiler $GCC_SPEC (long; cached after the first run)"
   spack install --no-check-signature -j"$JOBS" "$GCC_SPEC"
-  spack buildcache push --unsigned --update-index --private "$MIRROR_NAME" "$GCC_SPEC" || true
+  # --allow-missing: the push walks the whole DAG, and when gcc itself came from
+  # the build cache its build-only dependencies were never installed. Without the
+  # flag that prints a 27-line "Error: ... PackageNotInstalledError" block for a
+  # push that did exactly what it should.
+  spack buildcache push --unsigned --update-index --private --allow-missing "$MIRROR_NAME" "$GCC_SPEC" || true
 else
   log "Stack compiler $GCC_SPEC already installed"
 fi
@@ -188,6 +193,14 @@ log "Concretizing"
 spack -e "$ENV_DIR" concretize -f
 spack -e "$ENV_DIR" find -c || true
 
+# Which of those specs the build cache can actually supply. Printed here, before
+# the install, because it is the difference between "this run takes four minutes"
+# and "this run takes two hours" -- and because a miss names the cached spec it
+# collided with, which is what distinguishes a damaged cache from one built for a
+# different fabric profile, image or microarchitecture.
+log "Build cache coverage for this environment"
+python3 "$APP_DIR/inspect-buildcache.py" "$BUILDCACHE_PATH" --lock "$ENV_DIR/spack.lock" || true
+
 if [ "${service_concretize_only:-false}" = "true" ]; then
   log "concretize_only set; stopping before the install"
   exit 0
@@ -200,10 +213,33 @@ fi
 #    slowest-to-fetch package is.
 # ---------------------------------------------------------------------------
 log "Installing stack (this is the long part)"
-spack -e "$ENV_DIR" install --no-check-signature -j"$JOBS"
+INSTALL_LOG="${PWD}/spack-install.log"
+if ! spack -e "$ENV_DIR" install --no-check-signature -j"$JOBS" 2>&1 | tee "$INSTALL_LOG"; then
+  # Spack points at a per-package build log that lives on the node. Nobody
+  # reading the workflow log has a shell there, so inline the tails: without
+  # this, every compile failure costs a round trip to the cluster to learn which
+  # header was missing.
+  log "::error title=Error::spack install failed; tails of the failing build logs follow"
+  grep -oE 'See build log for details: .*' "$INSTALL_LOG" | awk '{print $NF}' | sort -u |
+  while read -r build_log; do
+    printf '\n----- last 80 lines of %s -----\n' "$build_log"
+    tail -n 80 "$build_log" 2>/dev/null || echo "(build log not readable)"
+  done
+  exit 1
+fi
+
+# Did the cache do its job? The forecast above is a prediction; this is what
+# happened, and the two disagreeing is itself worth seeing.
+# "fetching from build cache" is Spack 1.2's wording for a binary install, and
+# "==> Installing <name>-<version>-<hash>" for a source build. Counting both is
+# what makes "the cache worked" a number in the log rather than an impression.
+extracted="$(grep -c 'fetching from build cache' "$INSTALL_LOG" || true)"
+compiled="$(grep -cE '^==> Installing ' "$INSTALL_LOG" || true)"
+installed="$(spack -e "$ENV_DIR" find --no-groups 2>/dev/null | grep -c '@' || true)"
+log "Install complete: ${installed} specs in the environment -- ${extracted} from the build cache, ${compiled} compiled from source"
 
 log "Pushing to the build cache at $BUILDCACHE_PATH"
-spack -e "$ENV_DIR" buildcache push --unsigned --update-index --private "$MIRROR_NAME" || true
+spack -e "$ENV_DIR" buildcache push --unsigned --update-index --private --allow-missing "$MIRROR_NAME" || true
 
 # ---------------------------------------------------------------------------
 # 6. Modules.

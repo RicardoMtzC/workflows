@@ -33,6 +33,24 @@ MIRROR_NAME="local-buildcache"
 log() { printf '\n=== [controller] %s ===\n' "$*"; }
 
 # ---------------------------------------------------------------------------
+# 0. Site facts. Printed before anything can fail, because every later question
+#    ("why did it rebuild everything?", "why is the cache truncated?") is asked
+#    from the log alone, on a cluster the reader may have no shell on. Free space
+#    is here because a full filesystem is the usual cause of a half-written build
+#    cache, and it is invisible in every other message.
+# ---------------------------------------------------------------------------
+log "Site facts"
+printf 'host           : %s\n' "$(hostname)"
+printf 'os / kernel    : %s / %s\n' \
+       "$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")" "$(uname -r)"
+printf 'cores / memory : %s / %s\n' "$(nproc)" "$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')"
+printf 'spack root     : %s\n' "$SPACK_ROOT"
+printf 'build cache    : %s\n' "$BUILDCACHE_PATH"
+for _p in "$HOME" "$(dirname "$SPACK_ROOT")" "$BUILDCACHE_PATH"; do
+  [ -d "$_p" ] && df -h "$_p" | tail -n +2
+done | sort -u
+
+# ---------------------------------------------------------------------------
 # 1. Bootstrap Spack. Shallow-at-tag: the full history is ~1 GB and buys nothing.
 # ---------------------------------------------------------------------------
 if [ ! -d "$SPACK_ROOT/.git" ]; then
@@ -148,10 +166,22 @@ spack mirror add --scope site --unsigned "$MIRROR_NAME" "file://${BUILDCACHE_PAT
 # a v3/ + blobs/ tree, older versions wrote build_cache/, and hardcoding either
 # silently skips the refresh on the other.
 if [ -n "$(ls -A "$BUILDCACHE_PATH" 2>/dev/null)" ]; then
-  spack buildcache update-index "$MIRROR_NAME" || true
+  # Report the outcome instead of swallowing it: a mirror that fails to index is
+  # silently ignored by the concretizer, and the only symptom is that everything
+  # rebuilds. That has to be visible in the log.
+  if spack buildcache update-index "$MIRROR_NAME"; then
+    log "Build cache index refreshed"
+  else
+    echo "::warning::could not index the build cache at $BUILDCACHE_PATH; the concretizer will ignore it and every package will be compiled" >&2
+  fi
 else
   log "Build cache is empty (cold); its index appears after the first push"
 fi
+
+# What is actually in the cache, and is it intact? This is the report that tells
+# a reader with no shell on the cluster whether a redeployed cache arrived whole.
+log "Build cache inventory"
+python3 "$APP_DIR/inspect-buildcache.py" "$BUILDCACHE_PATH" || true
 
 if [ "${service_use_public_buildcache:-false}" = "true" ]; then
   log "Registering Spack's public binary cache"

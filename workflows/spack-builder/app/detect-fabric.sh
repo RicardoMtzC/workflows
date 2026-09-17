@@ -222,3 +222,8 @@ DETECT_HOST=$(hostname)
 DETECT_NPROC=$(nproc)
 EOF
 log "wrote $OUT"
+# To stdout, not through log(): this is the one artifact the build consumes, and
+# reading it back out of the log is how a wrong fabric profile or target gets
+# diagnosed without a shell on the compute node.
+printf '\n=== [detect] resolved profile ===\n'
+cat "$OUT"

@@ -5,7 +5,9 @@ modules, publishing everything to a binary build cache so later runs install in
 minutes instead of hours.
 
 **This is a build workflow, not an endpoint/session service.** It runs to
-completion and exits; it registers no `pw` endpoint.
+completion and exits. It does register a `pw` endpoint at the end, but that
+endpoint is a placeholder serving an empty page — see
+[The placeholder endpoint](#the-placeholder-endpoint).
 
 ## What gets built
 
@@ -178,9 +180,12 @@ against one while the module tree advertises the other.
 
 ```
 yamls/general.yaml        preprocess -> detect (worker) -> build (login node)
+                          -> verify -> endpoint + wait_for_endpoint
 app/controller.sh         login node: bootstrap Spack, externals, build cache
 app/detect-fabric.sh      worker: fabric + GPU + microarchitecture probe
 app/build.sh              login node: render, concretize, install, push, modules
+app/start-template.sh     login node: the placeholder endpoint
+app/inspect-buildcache.py build cache inventory, integrity and hit/miss forecast
 app/resolve-profile.sh    all-or-nothing override policy
 app/resolve-target.py     reconcile worker target with what the build host can emit
 app/render-env.py         spack.yaml.in + fabric fragment -> spack.yaml
@@ -203,47 +208,84 @@ tests/general/            recorded end-to-end test
 - **Deferred enhancements:** a GPU-aware OSU build (`-d cuda`) for device-buffer
   bandwidth numbers, and cuFFTMp to let GROMACS spread PME across multiple GPUs.
 
-### No recorded end-to-end test yet (deferred to a follow-up PR)
+## The placeholder endpoint
 
-CLAUDE.md requires every workflow to be tested end to end and to record that test
-under `tests/<variant>/`, run by `tools/tests/run-workflow-test.py`. **This
-workflow cannot satisfy that today**, and the reason is structural rather than an
-oversight.
-
-The runner's pass criteria are the run completing *and* an endpoint appearing:
+The last two jobs (`endpoint`, `wait_for_endpoint`) start a `pw` endpoint named
+`spack-builder-<run-slug>` that serves one static page: the run slug, the
+resolved fabric profile and the `MODULEPATH` to use. **Nothing in the build
+needs it.** It exists because the shared end-to-end test runner
+(`tools/tests/run-workflow-test.py`) passes a run only when
 
 ```python
 row["result"], row["error"] = "fail", "run completed but no endpoint listed"
 ```
 
-This workflow is a build-and-exit job. It deliberately serves no `pw` endpoint —
-it is the only workflow in the repo that does not — so a completely successful
-build is recorded as `fail`. No `_test` key opts out: `http_expect` only filters
-status codes *after* an endpoint has been found.
+does *not* fire — an endpoint named `*-<run-slug>` must be listed and its URL
+must answer. This is the only workflow in the repository that serves nothing, so
+rather than teach the shared runner a new pass mode, it serves an empty page.
 
-Closing this needs a small, additive change to the shared runner, kept separate so
-it can be reviewed on its own:
+The endpoint outlives the run, exactly like a real service: `wait_for_endpoint`
+touches the `SKIP_CLEANUP` marker once the endpoint answers and cancels the
+submitter, so the run completes with the endpoint still up and the test runner
+can find it, check it and then `pw endpoints delete` it. On a **cancel** — and on
+any teardown that does not skip cleanups — `cancel.sh` deletes the endpoint
+explicitly (`pw endpoints delete`) before killing the process group. Deleting it
+is the part that matters: killing the process alone would leave a stale entry in
+`pw endpoints list` that outlives the run.
 
-- `expect_endpoint: false` — skip the endpoint and HTTP checks. Defaulting it to
-  `true` leaves all existing tests (148 files, none of which set it) on exactly
-  the current code path, and `COLUMNS` need not change, so existing CSVs stay
-  valid. Three call sites are involved: the pass/fail branch, the post-run
-  endpoint lookup, and the endpoint check inside `teardown()`.
-- `success_command` — what to assert instead: a shell snippet run on the resource
-  via `pw ssh`, non-zero meaning failure. For this workflow the meaningful check
-  is that the Spack install and a populated build cache actually exist.
+Delete it by hand after a manual run:
 
-Two further nuances specific to this workflow when that test is written:
+```bash
+pw endpoints delete spack-builder-<run-slug>
+```
 
-- `leftover_patterns` must be overridden. The default `["pw endpoints"]` checks
-  nothing useful for a job that never served anything; `["spack install"]` is the
-  meaningful pattern here.
-- The test should set `concretize_only: true`. A full build runs for hours, which
-  no CI-style test should do; concretizing still exercises the whole pipeline —
-  bootstrap, externals, build cache, worker inspection, render and solve — and
-  finishes in minutes.
+**This is expected to be removed.** The build is finished and the stack is usable
+before the endpoint starts; it is scaffolding for the test framework, not a
+feature. If the runner grows a way to express "this workflow serves nothing and
+its result is a command that must succeed on the resource", these two jobs and
+`app/start-template.sh` should go. Keep them only if a real use for a served page
+appears — a browsable build log or module list would be one.
 
-`tests/general/cpu-smoke.json` is a **draft** of that test, written against the
-proposed keys. It will not pass until the runner supports them: the unknown keys
-are merged into the test metadata but never read, so the endpoint check still runs
-and fails.
+## Diagnosing a run from the logs alone
+
+Whoever reads a failed run usually has no shell on the cluster, so the things
+needed to explain a build are printed rather than left on the node:
+
+| Question | Where the answer is printed |
+|---|---|
+| What is this node, and is the disk full? | `controller.sh` site facts: host, OS, kernel, cores, memory and `df -h` for `$HOME`, the Spack root and the cache — printed before anything can fail |
+| Did the mirror index? | `controller.sh` reports the result of `spack buildcache update-index` instead of swallowing it. An unindexed mirror is silently ignored by the concretizer, and the only other symptom is that everything rebuilds |
+| What is in the build cache, and did it arrive intact? | `inspect-buildcache.py` inventory: spec count, packages, and a blob-level integrity check (every manifest's blobs present and the exact size the manifest records) |
+| Will this run use the cache, or compile for two hours? | `inspect-buildcache.py --lock` after concretization: hits, misses, and for each miss the same-named cached spec it collided with |
+| Which hardware did the stack get built for? | `detect-fabric.sh` echoes the resolved `fabric.env`; `build.sh` prints the profile and the target decision |
+| Why did a package fail to compile? | `build.sh` inlines the last 80 lines of each failing package's Spack build log, which otherwise only exists on the node |
+| Did the build actually succeed? | `BUILD_STATUS` + the `verify` job. `script_submitter`'s unscheduled path detaches the script and polls `kill -0`, so it sees that the process ended but never its exit status |
+
+The integrity check compares **sizes**, not checksums: hashing a 1.4 GiB cache
+on every run costs minutes, and the failure it guards against — an interrupted
+copy or a full disk — truncates files, which a size check catches exactly.
+
+A cache miss is reported as a *warning*, not an error, in both cases (damaged
+blobs and no matching hash): Spack compiles what it cannot extract, so the run
+still produces a correct stack. What the reader needs is the reason it suddenly
+takes two hours, and the two causes look identical from the outside —
+
+- **damaged**: manifests exist but blobs are missing or truncated → re-copy the cache.
+- **complete but irrelevant**: every hash differs because this image resolved
+  different externals, or the fabric profile or microarchitecture changed → working
+  as designed; the run rebuilds and pushes, and the cache then serves both.
+
+## Recorded tests
+
+`tests/general/` holds the end-to-end tests, run by
+`python3 tools/tests/run-workflow-test.py <test>.json`:
+
+| test | what it covers |
+|---|---|
+| `cpu-smoke.json` | `concretize_only` into a throwaway Spack root on `aws`: bootstrap, externals, build cache, worker inspection, render and solve, in minutes rather than hours. The cheap way to validate a cluster or a spec change |
+| `buildcache-redeploy.json` | a full install on `aws` with a build cache already present — the redeployment case: a fresh cluster whose only Spack artifact is a copied `${HOME}/spack-buildcache` |
+| `gce2-buildcache-redeploy.json` | the same redeployment on `gce2`, a different cloud and image: the externals differ, so it is also the test of whether a cache built elsewhere still applies |
+
+Each sets a `warm_marker` on the Spack root and the cache, so the CSV records
+whether a row was a cold, warm or partial start — for the redeploy tests,
+`partial` (cache present, no Spack root) *is* the case under test.
