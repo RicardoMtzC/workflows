@@ -236,15 +236,14 @@ tests/general/            recorded end-to-end test
 
 ## Known gaps and deferred work
 
-- **The GPU path has still not been run end to end.** Two attempts: `aws`
-  `g6.12xlarge` never got a node (no cloud capacity), and gce2 run
-  `thorough-oryx` reached the build but the inspected GPU node reported
-  `HAS_GPU=1` with an **empty** compute capability — `lspci` saw the device,
-  `nvidia-smi` gave no answer inside the batch job. So CUDA/driver/GCC
-  compatibility is still unverified. Two things to expect: the aws `gpu`
-  partition advertises `Gres=(null)`, so a `--gpus=` request there has nothing to
-  bind to; and the images ship **CUDA 13.2**, newer than anything GROMACS 2024.3
-  was released against.
+- **GPU detection works; the GPU build has still not been run end to end.**
+  Verified on gce2 (run `loving-firefly`): the inspection job reports
+  `2x NVIDIA H100 80GB HBM3`, `cuda_arch=90`, driver `595.45.04`, driver CUDA
+  `13.2`, toolkit `nvcc 13.2`. What is still unverified is everything after that
+  — whether `openmpi+cuda` and `gromacs@2024.3 +cuda` concretize and build
+  against **CUDA 13.2**, which is newer than anything GROMACS 2024.3 was released
+  against. Note also that the aws `gpu` partition advertises `Gres=(null)`, so a
+  `--gpus=` request there has nothing to bind to; gce2 does advertise its GPUs.
 - **A GPU build now fails when no usable GPU is reported**, instead of quietly
   producing the CPU stack. If inspection lands on a GPU-less node, or the node's
   GPUs are hidden from a job that requested none, the run stops in the first
@@ -353,6 +352,14 @@ and all three submissions of a run carry the **same** `PW_JOB_ID`, so one shared
 directory means each job truncates the previous one's log. That is how the aws
 run `charming-mongoose` lost its entire build log to the endpoint job, leaving
 the platform-side log as the only copy.
+
+`fabric.env` is **sourced**, so every value it carries is quoted on write. Until
+the GPU fields arrived every value was a single token — profiles, 0/1 flags,
+paths, targets — so nothing needed quoting and nothing revealed the gap. The
+first multi-word value (`GPU_NAME=NVIDIA H100 80GB HBM3`) made line 8 parse as an
+assignment followed by the command `H100`, and `build.sh` aborted with status 127
+before running anything. `bash -n` does not catch this; writing the file with
+real values and sourcing it does.
 
 The integrity check compares **sizes**, not checksums: hashing a 1.4 GiB cache
 on every run costs minutes, and the failure it guards against — an interrupted

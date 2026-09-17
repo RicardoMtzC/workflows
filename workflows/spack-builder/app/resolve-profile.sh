@@ -67,16 +67,19 @@ fi
 EFA_PREFIX=""
 [ "$f" = "aws" ] && EFA_PREFIX="/opt/amazon/efa"
 
+# Quoted for the same reason detect-fabric.sh quotes: this file is sourced, and
+# override_target is free text a user types. An unquoted value with a space in it
+# runs the rest of the line as a command.
 cat > "$FABRIC_OUT" <<EOF
-CLOUD=override
-FABRIC_PROFILE=$f
-HAS_EFA=$( [ "$f" = "aws" ] && echo 1 || echo 0 )
-HAS_VERBS=$( { [ "$f" = "azure" ] || [ "$f" = "oracle" ]; } && echo 1 || echo 0 )
-EFA_PREFIX=$EFA_PREFIX
-HAS_GPU=$HAS_GPU
-GPU_ARCH=$GPU_ARCH
-CUDA_PREFIX=
-OVERRIDE_TARGET=$t
+CLOUD="override"
+FABRIC_PROFILE="$f"
+HAS_EFA="$( [ "$f" = "aws" ] && echo 1 || echo 0 )"
+HAS_VERBS="$( { [ "$f" = "azure" ] || [ "$f" = "oracle" ]; } && echo 1 || echo 0 )"
+EFA_PREFIX="$EFA_PREFIX"
+HAS_GPU="$HAS_GPU"
+GPU_ARCH="$GPU_ARCH"
+CUDA_PREFIX=""
+OVERRIDE_TARGET="$t"
 EOF
 
 log "complete overrides accepted: target=$t fabric=$f cuda_arch=$c"

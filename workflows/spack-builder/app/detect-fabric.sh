@@ -254,24 +254,31 @@ fi
 
 log "selected fabric profile: $FABRIC_PROFILE"
 
+# Every value is QUOTED. This file is sourced, and until GPU_NAME arrived every
+# value it carried was a single token -- profiles, 0/1 flags, paths, targets --
+# so nothing needed quoting and nothing revealed that. The first multi-word value
+# turned line 8 into `GPU_NAME=NVIDIA` followed by the command `H100`, and
+# sourcing it aborted build.sh with status 127 before it did anything at all
+# (gce2 run loving-firefly). Quote on write, not on read: a consumer cannot undo
+# this, and the next field with a space would repeat it.
 cat > "$OUT" <<EOF
-CLOUD=$CLOUD
-FABRIC_PROFILE=$FABRIC_PROFILE
-HAS_EFA=$HAS_EFA
-HAS_VERBS=$HAS_VERBS
-EFA_PREFIX=$EFA_PREFIX
-HAS_GPU=$HAS_GPU
-GPU_ARCH=$GPU_ARCH
-GPU_NAME=$GPU_NAME
-GPU_COUNT=$GPU_COUNT
-DRIVER_VERSION=$DRIVER_VERSION
-CUDA_VERSION=$CUDA_VERSION
-NVCC_VERSION=$NVCC_VERSION
-CUDA_PREFIX=$CUDA_PREFIX
-BUILD_TARGET=$BUILD_TARGET
-BUILD_ARCH=$BUILD_ARCH
-DETECT_HOST=$(hostname)
-DETECT_NPROC=$(nproc)
+CLOUD="$CLOUD"
+FABRIC_PROFILE="$FABRIC_PROFILE"
+HAS_EFA="$HAS_EFA"
+HAS_VERBS="$HAS_VERBS"
+EFA_PREFIX="$EFA_PREFIX"
+HAS_GPU="$HAS_GPU"
+GPU_ARCH="$GPU_ARCH"
+GPU_NAME="$GPU_NAME"
+GPU_COUNT="$GPU_COUNT"
+DRIVER_VERSION="$DRIVER_VERSION"
+CUDA_VERSION="$CUDA_VERSION"
+NVCC_VERSION="$NVCC_VERSION"
+CUDA_PREFIX="$CUDA_PREFIX"
+BUILD_TARGET="$BUILD_TARGET"
+BUILD_ARCH="$BUILD_ARCH"
+DETECT_HOST="$(hostname)"
+DETECT_NPROC="$(nproc)"
 EOF
 log "wrote $OUT"
 # To stdout, not through log(): this is the one artifact the build consumes, and
