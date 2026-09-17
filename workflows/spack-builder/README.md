@@ -244,6 +244,12 @@ tests/general/            recorded end-to-end test
   against **CUDA 13.2**, which is newer than anything GROMACS 2024.3 was released
   against. Note also that the aws `gpu` partition advertises `Gres=(null)`, so a
   `--gpus=` request there has nothing to bind to; gce2 does advertise its GPUs.
+  Run `moral-ghost` was the first to reach the CUDA registration and found a
+  second latent bug there: `spack config add "packages:cuda:externals:[{spec: …}]"`
+  cannot work, because `config add` splits its argument on `:` and the colons
+  inside the inline mapping become path components. The external is now written
+  as a YAML file and merged with `spack config add -f`, which was verified
+  against Spack 1.2.2 before being committed.
 - **A GPU build now fails when no usable GPU is reported**, instead of quietly
   producing the CPU stack. If inspection lands on a GPU-less node, or the node's
   GPUs are hidden from a job that requested none, the run stops in the first

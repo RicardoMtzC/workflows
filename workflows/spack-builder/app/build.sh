@@ -112,10 +112,30 @@ if [ "$BUILD_GPU" = "true" ]; then
 fi
 
 if [ "$GPU_ACTIVE" = "1" ] && [ -n "${CUDA_PREFIX:-}" ]; then
-  log "Registering external CUDA at $CUDA_PREFIX"
-  CUDA_VER="$("$CUDA_PREFIX/bin/nvcc" --version 2>/dev/null | grep -oE 'release [0-9]+\.[0-9]+' | awk '{print $2}')"
-  spack config --scope site add "packages:cuda:externals:[{spec: cuda@${CUDA_VER:-12.4.0}, prefix: $CUDA_PREFIX}]"
-  spack config --scope site add "packages:cuda:buildable:false"
+  # nvcc is the authority on the toolkit version; NVCC_VERSION from detection is
+  # the same number read on the compute node, kept as the fallback.
+  CUDA_VER="$("$CUDA_PREFIX/bin/nvcc" --version 2>/dev/null |
+              grep -oE 'release [0-9]+\.[0-9]+' | awk '{print $2}')"
+  CUDA_VER="${CUDA_VER:-${NVCC_VERSION:-}}"
+  log "Registering external CUDA ${CUDA_VER:-<unknown version>} at $CUDA_PREFIX"
+  [ -n "$CUDA_VER" ] || { echo "::error title=Error::cannot read a CUDA version from $CUDA_PREFIX/bin/nvcc" >&2; exit 1; }
+
+  # Written as a YAML file rather than passed to `spack config add` as a path
+  # expression. That form cannot express this value: `config add` splits its
+  # argument on ':', so the colons inside `spec:` and `prefix:` are read as more
+  # path components and Spack rejects the result with
+  #   {'[{spec': {' cuda@13.2, prefix': '/usr/local/cuda}]'}} is not of type 'array'
+  # (gce2 run moral-ghost -- the first run ever to reach this line).
+  cat > "${PWD}/cuda-external.yaml" <<YAML
+packages:
+  cuda:
+    buildable: false
+    externals:
+    - spec: cuda@${CUDA_VER}
+      prefix: ${CUDA_PREFIX}
+YAML
+  spack config --scope site add -f "${PWD}/cuda-external.yaml"
+  spack config --scope site get packages | sed -n '/^  cuda:/,/^  [a-z]/p'
 fi
 
 # ---------------------------------------------------------------------------
