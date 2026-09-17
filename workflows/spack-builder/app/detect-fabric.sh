@@ -125,7 +125,8 @@ probe_verbs() {
 
 # GPU detection. Returns 0 if an NVIDIA GPU is present. Sets globals GPU_ARCH,
 # CUDA_PREFIX as side effects.
-GPU_ARCH=""; CUDA_PREFIX=""
+GPU_ARCH=""; CUDA_PREFIX=""; GPU_NAME=""; GPU_COUNT=0
+DRIVER_VERSION=""; CUDA_VERSION=""; NVCC_VERSION=""
 probe_gpu() {
   local found=1
   # PCI enumeration works even without the driver loaded.
@@ -137,20 +138,66 @@ probe_gpu() {
   # the toolkit installed but no GPU (or no driver) it exits 9 and writes its
   # complaint to STDOUT, so `2>/dev/null` does not hide it. Capturing that blindly
   # set HAS_GPU=1 and made the error text the cuda_arch on a GPU-less node.
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    local cc
-    # compute_cap is like "8.0"; strip the dot -> spack cuda_arch "80".
-    if cc=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ') \
-       && [[ "$cc" =~ ^[0-9]+\.[0-9]+$ ]]; then
-      GPU_ARCH="${cc//./}"
-      found=0
+  #
+  # Every failure below is LOGGED rather than swallowed. A silent failure here is
+  # indistinguishable in the log from a node with no GPU, and the consequence is
+  # severe and quiet: build.sh needs HAS_GPU=1 *and* a non-empty GPU_ARCH, so an
+  # unexplained empty arch turns a requested GPU build into a CPU-only one after
+  # hours of compiling. Seen on gce2 run thorough-oryx: lspci found the device,
+  # nvidia-smi reported nothing, and the log could not say why.
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    log "nvidia-smi not on PATH; cannot read the compute capability"
+  else
+    local smi_out smi_rc
+    # Every GPU, not just the first: the count and the models are what tell a
+    # reader whether the job actually got the hardware the node has. A node with
+    # 2 H100s that reports one line -- or none -- is the interesting case, and
+    # the old probe could not express the difference.
+    smi_out=$(nvidia-smi --query-gpu=index,name,compute_cap,driver_version,memory.total \
+                         --format=csv,noheader 2>&1)
+    smi_rc=$?
+    if [ $smi_rc -ne 0 ]; then
+      log "nvidia-smi exited ${smi_rc}: ${smi_out}"
+    else
+      GPU_COUNT=$(printf '%s\n' "$smi_out" | grep -c '[^[:space:]]' || true)
+      log "nvidia-smi reports ${GPU_COUNT} GPU(s) visible to this job:"
+      printf '%s\n' "$smi_out" | while IFS= read -r line; do [ -n "$line" ] && log "  ${line}"; done
+      GPU_NAME="$(printf '%s' "$smi_out" | head -n1 | cut -d, -f2 | xargs)"
+      DRIVER_VERSION="$(printf '%s' "$smi_out" | head -n1 | cut -d, -f4 | xargs)"
+      local cc caps
+      # compute_cap is like "9.0"; strip the dot -> spack cuda_arch "90".
+      cc="$(printf '%s' "$smi_out" | head -n1 | cut -d, -f3 | tr -d ' ')"
+      # A mixed-GPU node cannot be served by one cuda_arch; say so rather than
+      # silently building for whichever card happens to be index 0.
+      caps="$(printf '%s\n' "$smi_out" | cut -d, -f3 | tr -d ' ' | sort -u | tr '\n' ' ')"
+      if [ "$(printf '%s' "$caps" | wc -w)" -gt 1 ]; then
+        log "WARNING: this node has mixed compute capabilities (${caps}); building for ${cc}"
+      fi
+      if [[ "$cc" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        GPU_ARCH="${cc//./}"
+        found=0
+        log "selected: ${GPU_COUNT}x ${GPU_NAME}, compute capability ${cc} -> cuda_arch=${GPU_ARCH}, driver ${DRIVER_VERSION}"
+      else
+        log "nvidia-smi returned no usable compute capability (got '${cc}' from: ${smi_out})"
+      fi
     fi
+    # The driver's CUDA runtime version, which is what decides whether a given
+    # GROMACS or OpenMPI release can be built against this node at all.
+    CUDA_VERSION="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n1)"
+    [ -n "$CUDA_VERSION" ] && log "driver CUDA runtime: ${CUDA_VERSION}"
   fi
   # Locate an existing CUDA toolkit so we can register it external (faster builds).
   for p in /usr/local/cuda "${CUDA_HOME:-}" /opt/cuda; do
     [ -n "$p" ] || continue
     if [ -x "$p/bin/nvcc" ]; then CUDA_PREFIX="$(cd "$p" && pwd)"; break; fi
   done
+  if [ -n "$CUDA_PREFIX" ]; then
+    NVCC_VERSION="$("$CUDA_PREFIX/bin/nvcc" --version 2>/dev/null |
+                    sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -n1)"
+    log "CUDA toolkit at ${CUDA_PREFIX} (nvcc ${NVCC_VERSION:-unknown})"
+  else
+    log "no CUDA toolkit found; Spack would have to build one"
+  fi
   return $found
 }
 
@@ -215,6 +262,11 @@ HAS_VERBS=$HAS_VERBS
 EFA_PREFIX=$EFA_PREFIX
 HAS_GPU=$HAS_GPU
 GPU_ARCH=$GPU_ARCH
+GPU_NAME=$GPU_NAME
+GPU_COUNT=$GPU_COUNT
+DRIVER_VERSION=$DRIVER_VERSION
+CUDA_VERSION=$CUDA_VERSION
+NVCC_VERSION=$NVCC_VERSION
 CUDA_PREFIX=$CUDA_PREFIX
 BUILD_TARGET=$BUILD_TARGET
 BUILD_ARCH=$BUILD_ARCH

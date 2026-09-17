@@ -99,9 +99,15 @@ EFFECTIVE_ARCH=""
 if [ "$BUILD_GPU" = "true" ]; then
   if [ "${HAS_GPU:-0}" = "1" ] && [ -n "${GPU_ARCH:-}" ]; then
     GPU_ACTIVE=1; EFFECTIVE_ARCH="$GPU_ARCH"
-    log "GPU path ENABLED (cuda_arch=$EFFECTIVE_ARCH, cuda_prefix=${CUDA_PREFIX:-<spack-built>})"
+    log "GPU path ENABLED: ${GPU_COUNT:-?}x ${GPU_NAME:-NVIDIA GPU}, cuda_arch=${EFFECTIVE_ARCH}, driver ${DRIVER_VERSION:-?}, driver CUDA ${CUDA_VERSION:-?}, toolkit ${CUDA_PREFIX:-<spack-built>} (nvcc ${NVCC_VERSION:-?})"
   else
-    log "WARNING: GPU requested but none detected (HAS_GPU=${HAS_GPU:-0}, arch='${GPU_ARCH:-}'). Building CPU-only."
+    # Refuse rather than quietly build the CPU stack. Someone who ticked "build
+    # the GPU path" and waited two hours for a stack with no CUDA in it has been
+    # given the wrong answer slowly, which is worse than the right answer now.
+    # The usual causes are an inspection job that landed on a GPU-less node, and
+    # a node whose GPUs are hidden from the job because no GPU was requested.
+    echo "::error title=Error::GPU build requested but the inspected node reported no usable GPU (HAS_GPU=${HAS_GPU:-0}, cuda_arch='${GPU_ARCH:-}', detected on ${DETECT_HOST:-?}). See the [detect] section above for what nvidia-smi said. Request a GPU for the inspection job (cluster.slurm.gpus), point it at a partition whose nodes have one, or turn off 'Build the GPU path'." >&2
+    exit 1
   fi
 fi
 

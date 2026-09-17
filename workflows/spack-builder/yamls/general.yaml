@@ -270,9 +270,6 @@ jobs:
           sed -i 's/=\(.*\)/="\1"/' inputs.sh
           cat <<'EOF' >> inputs.sh
           PATH=$HOME/pw:$PATH
-          app_dir="${PWD}/workflows/spack-builder/app"
-          fabric_env="${PWD}/fabric.env"
-          env_dir="${PWD}/spack-env"
           service_name="${{ inputs.service.name }}"
           pw_endpoints_args="--name ${{ inputs.service.name }}-${PW_RUN_SLUG}"
           service_spack_version="${{ inputs.service.spack_version }}"
@@ -285,6 +282,18 @@ jobs:
           OVERRIDE_TARGET="${{ inputs.service.use_overrides && inputs.service.override_target || '' }}"
           OVERRIDE_FABRIC="${{ inputs.service.use_overrides && inputs.service.override_fabric || '' }}"
           OVERRIDE_CUDA_ARCH="${{ inputs.service.use_overrides && inputs.service.override_cuda_arch || '' }}"
+          EOF
+          # Resolved HERE, and deliberately not inside the quoted heredoc above.
+          # Each submitted job runs in its OWN directory under this one, so a
+          # ${PWD}-relative value would expand differently in every job that
+          # sources inputs.sh: detect would write fabric.env into detect/ and the
+          # build would look for it in build/, and app_dir would point at a
+          # checkout that only exists here. That is exactly how run thorough-oryx
+          # failed with "No fabric profile at .../build/fabric.env".
+          cat <<EOF >> inputs.sh
+          app_dir="${PWD}/workflows/spack-builder/app"
+          fabric_env="${PWD}/fabric.env"
+          env_dir="${PWD}/spack-env"
           EOF
           # Remove empty variables
           sed -i '/=\s*$\|=undefined\s*$/d' inputs.sh

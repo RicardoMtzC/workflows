@@ -236,13 +236,20 @@ tests/general/            recorded end-to-end test
 
 ## Known gaps and deferred work
 
-- **The GPU path has still not been run end to end.** An attempt on the `aws`
-  `gpu` partition (`g6.12xlarge`, NVIDIA L4) could not get a node — the cloud had
-  no capacity — so CUDA/driver/GCC compatibility remains unverified. Two things
-  to expect when it does run: the partition advertises `Gres=(null)`, so ask for
-  `gpus: 0` and let the partition guarantee the hardware rather than requesting a
-  GRES that SLURM does not know about; and the image ships **CUDA 13.2**, which
-  is newer than anything GROMACS 2024.3 was released against.
+- **The GPU path has still not been run end to end.** Two attempts: `aws`
+  `g6.12xlarge` never got a node (no cloud capacity), and gce2 run
+  `thorough-oryx` reached the build but the inspected GPU node reported
+  `HAS_GPU=1` with an **empty** compute capability — `lspci` saw the device,
+  `nvidia-smi` gave no answer inside the batch job. So CUDA/driver/GCC
+  compatibility is still unverified. Two things to expect: the aws `gpu`
+  partition advertises `Gres=(null)`, so a `--gpus=` request there has nothing to
+  bind to; and the images ship **CUDA 13.2**, newer than anything GROMACS 2024.3
+  was released against.
+- **A GPU build now fails when no usable GPU is reported**, instead of quietly
+  producing the CPU stack. If inspection lands on a GPU-less node, or the node's
+  GPUs are hidden from a job that requested none, the run stops in the first
+  minutes with an actionable message rather than after two hours with the wrong
+  artefact.
 - **The `common` target branch is unit-tested, not run.** Every branch of
   `resolve-target.py` was exercised against archspec on the aws login node
   (`zen3`→`x86_64_v3`, `zen4`→`x86_64_v4`, `cascadelake`→fallback,
@@ -312,7 +319,8 @@ needed to explain a build are printed rather than left on the node:
 | Did the mirror index? | `controller.sh` reports the result of `spack buildcache update-index` instead of swallowing it. An unindexed mirror is silently ignored by the concretizer, and the only other symptom is that everything rebuilds |
 | What is in the build cache, and did it arrive intact? | `inspect-buildcache.py` inventory: spec count, packages, and a blob-level integrity check (every manifest's blobs present and the exact size the manifest records) |
 | Will this run use the cache, or compile for two hours? | `inspect-buildcache.py --lock` after concretization: hits, misses, and for each miss the same-named cached spec it collided with |
-| Which hardware did the stack get built for? | `detect-fabric.sh` echoes the resolved `fabric.env`; `build.sh` prints the profile and the target decision |
+| Which hardware did the stack get built for? | `detect-fabric.sh` echoes the resolved `fabric.env`; `build.sh` prints the profile and the target decision. The login node's CPU model and `spack arch -t` are in the controller's site facts |
+| Is there really a usable GPU, and which CUDA? | `detect-fabric.sh` logs the GPU model, compute capability, driver version, the driver's CUDA runtime and the toolkit's `nvcc` version — and logs *why* when `nvidia-smi` gives no answer, rather than leaving an unexplained empty `cuda_arch` |
 | Why did a package fail to compile? | `build.sh` inlines the last 80 lines of each failing package's Spack build log, which otherwise only exists on the node |
 | Did the build actually succeed? | `BUILD_STATUS` + the `verify` job. `script_submitter`'s unscheduled path detaches the script and polls `kill -0`, so it sees that the process ended but never its exit status |
 
