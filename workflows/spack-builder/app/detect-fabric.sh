@@ -281,6 +281,17 @@ DETECT_HOST="$(hostname)"
 DETECT_NPROC="$(nproc)"
 EOF
 log "wrote $OUT"
+
+# Header inventory of THIS (compute) node, written beside fabric.env so the
+# head-node step can diff the two. Externals are detected from libraries but
+# COMPILED against, so which -devel packages an image carries decides whether
+# ucx/libfabric/slurm survive as externals or get rebuilt -- and that was
+# previously invisible in the log. CUDA_PREFIX is exported because the probe
+# searches it for cuda.h.
+CUDA_PREFIX="${CUDA_PREFIX}" bash "${app_dir}/probe-headers.sh" \
+  "$(dirname "$OUT")/headers.compute.env" compute || \
+  log "WARNING: header probe failed; continuing (detection is not gated on it)"
+
 # To stdout, not through log(): this is the one artifact the build consumes, and
 # reading it back out of the log is how a wrong fabric profile or target gets
 # diagnosed without a shell on the compute node.

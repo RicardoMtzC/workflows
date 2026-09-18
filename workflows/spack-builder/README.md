@@ -369,6 +369,94 @@ tests/general/            recorded end-to-end test
 - **Deferred enhancements:** a GPU-aware OSU build (`-d cuda`) for device-buffer
   bandwidth numbers, and cuFFTMp to let GROMACS spread PME across multiple GPUs.
 
+## Verifying the stack actually runs
+
+A build exiting 0 and an endpoint answering HTTP say nothing about whether the
+binaries can execute. The build happens on the **login node**, so a stack
+compiled for the login node's ISA runs there perfectly and every recorded
+criterion passes. Run `fair-mastodon` did exactly that: it passed while 45 specs
+in the environment -- three GROMACS builds among them -- carried `skylake_avx512`
+AVX-512 instructions that its `zen2` worker could not execute.
+
+So the workflow runs the binaries on a compute node, in its own job
+(`exec_check` + `exec_verify`). It has to be a separate submitted job: a check
+that runs where the build ran proves nothing, because that is the node whose ISA
+the binaries wrongly match.
+
+`app/check-exec.sh` runs `gmx_mpi -version` for every GROMACS install in the
+environment and separates two verdicts, which mean different things:
+
+- **SIGILL (exit 132)** -- the binary cannot execute on this CPU. This is the
+  fault the job exists to catch, and it fails the run.
+- **anything else** -- the binary started but its MPI could not initialise here.
+  This warns rather than fails. It is a property of the launch environment, not
+  of what was compiled: MPICH built `--with-pmi=pmi2` has no process manager to
+  reach when run standalone (`write_line error; fd=-1`), and `intel-oneapi-mpi`
+  aborts with `OFI fi_getinfo() failed` on a node with no suitable provider.
+  Failing on those would fail a run on every cluster without an EFA device.
+
+A non-SIGILL failure is retried once under the binary's own launcher, resolved
+from the MPI it actually links against (`ldd`) rather than whatever `mpiexec` is
+on `PATH`. If *every* binary fails, the job fails regardless: nothing was proven
+to run, which is the same as having no check at all.
+
+### Why it does not use `srun`
+
+The job is submitted to the compute partition, so the script is already running
+on a worker -- `srun` is not needed to reach one, and it cannot launch half of
+these binaries anyway:
+
+    $ srun --mpi=list
+    none, cray_shasta, pmi2          # no pmix
+    $ ls /usr/lib64/slurm/           # mpi_pmi2.so, libpmi2.so present
+    $ ls /usr/include/slurm/pmi2.h   # missing, as is pmix.h
+
+OpenMPI 5 dropped native PMI2 in favour of PMIx, and this SLURM has no pmix
+plugin, so `srun ./gmx_mpi` cannot start the OpenMPI-linked builds -- the CUDA
+one among them -- although they run perfectly standalone via singleton init.
+Running directly and falling back to the binary's own launcher avoids PMI
+negotiation entirely. This is the same split the header probe reports: the PMI
+runtime libraries are installed, the headers to build against are not.
+
+When the check does land on the node that built the stack -- which happens with
+`scheduler=false`, where there is no separate compute node -- it says so with a
+warning, because in that configuration it cannot detect a microarchitecture
+mismatch at all.
+
+## Header inventory: head node vs compute node
+
+`spack external find` detects a package from its libraries, but Spack then
+COMPILES against it, which needs the `-devel` headers. `prune-headerless-externals.py`
+removes externals that lack them, but silently -- so a build that failed on a
+missing `ucx` or `pmi2` header left nothing in the log saying which headers the
+node actually had.
+
+`app/probe-headers.sh` now records that inventory explicitly, on **both** nodes,
+as part of the `detect` job:
+
+- `Inspect compute node` writes `headers.compute.env` beside `fabric.env`.
+- `Inspect head node` writes `headers.head.env`, and also logs the head node's
+  own parameters -- microarchitecture, OS image, kernel, glibc, gcc, nvcc --
+  which were never written down anywhere before. When a stack misbehaves on the
+  worker the first question is how the two nodes differ, and that was
+  unanswerable after the fact.
+
+Probed: `UCX`, `LIBFABRIC`, `VERBS`, `RDMACM`, `SLURM`, `PMI2`, `PMIX`, `CUDA`,
+`GDRCOPY`.
+
+The two sets are then diffed, and the asymmetry matters:
+
+- **present on compute, missing on head → the run fails loudly.** The build
+  links on the head node, so such a header cannot be used no matter what the
+  worker supports. This is the split-image case, and it otherwise surfaces as a
+  configure error hours into a compile.
+- **present on head, missing on compute → warning.** It builds, and may still
+  run, because the runtime library can be present while only the headers are
+  absent.
+
+With full overrides the `detect` job is skipped entirely, so neither probe runs
+and there is nothing to compare.
+
 ## The placeholder endpoint
 
 The last two jobs (`endpoint`, `wait_for_endpoint`) start a `pw` endpoint named

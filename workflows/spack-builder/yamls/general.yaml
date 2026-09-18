@@ -249,6 +249,8 @@ jobs:
       DETECT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.DETECT_SCRIPT }}
       BUILD_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.BUILD_SCRIPT }}
       ENDPOINT_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.ENDPOINT_SCRIPT }}
+      EXEC_DIR: ${{ needs.preprocess.steps.assemble.outputs.EXEC_DIR }}
+      EXEC_SCRIPT: ${{ needs.preprocess.steps.assemble.outputs.EXEC_SCRIPT }}
       SKIP_CLEANUP_PATH: ${{ needs.preprocess.steps.assemble.outputs.SKIP_CLEANUP_PATH }}
       NEED_DETECT: ${{ needs.preprocess.steps.assemble.outputs.NEED_DETECT }}
     steps:
@@ -338,10 +340,11 @@ jobs:
           # only surviving copy was the platform-side log.) The scripts
           # themselves are unaffected: every path they use -- inputs.sh,
           # fabric.env, spack-env, app/ -- is absolute and still points here.
-          mkdir -p "${PWD}/detect" "${PWD}/build" "${PWD}/endpoint"
+          mkdir -p "${PWD}/detect" "${PWD}/build" "${PWD}/endpoint" "${PWD}/exec"
           echo "DETECT_DIR=${PWD}/detect" | tee -a $OUTPUTS
           echo "BUILD_DIR=${PWD}/build" | tee -a $OUTPUTS
           echo "ENDPOINT_DIR=${PWD}/endpoint" | tee -a $OUTPUTS
+          echo "EXEC_DIR=${PWD}/exec" | tee -a $OUTPUTS
 
           # script_submitter runs an existing script, so each one is inputs.sh
           # concatenated with its body. Note this puts the script in the run
@@ -354,6 +357,10 @@ jobs:
           cp inputs.sh build-${PW_JOB_ID}.sh
           cat "workflows/spack-builder/app/build.sh" >> build-${PW_JOB_ID}.sh
           echo "BUILD_SCRIPT=${PWD}/build-${PW_JOB_ID}.sh" | tee -a $OUTPUTS
+
+          cp inputs.sh exec-${PW_JOB_ID}.sh
+          cat "workflows/spack-builder/app/check-exec.sh" >> exec-${PW_JOB_ID}.sh
+          echo "EXEC_SCRIPT=${PWD}/exec-${PW_JOB_ID}.sh" | tee -a $OUTPUTS
 
           # The placeholder endpoint. The trap wrapper is the one every service
           # workflow here uses: it runs cancel.sh once and then kills the process
@@ -386,6 +393,11 @@ jobs:
     needs:
       - preprocess
     if: ${{ needs.preprocess.outputs.NEED_DETECT == '1' }}
+    # For the `run:` step below. The submitter step carries its own `resource:`
+    # and is unaffected; this only says where a plain `run:` executes, which for
+    # the head-node inspection must be the login node.
+    ssh:
+      remoteHost: ${{ inputs.cluster.resource.ip }}
     steps:
       - name: Inspect compute node
         uses: github/parallelworks/workflows@add-spack-builder
@@ -412,6 +424,19 @@ jobs:
           pbs:
             is_enabled: ${{ inputs.cluster.pbs.is_enabled }}
             scheduler_directives: ${{ inputs.cluster.pbs.scheduler_directives }}
+
+      # The build links against what the LOGIN node has, not what the worker
+      # has, so the worker's header inventory alone cannot predict a build
+      # failure. This records the head node's own parameters -- microarch, image,
+      # toolchain -- which were never written down anywhere before, and fails the
+      # run when a header exists on the worker but not here.
+      - name: Inspect head node
+        run: |
+          set -uo pipefail
+          cd "${{ needs.preprocess.outputs.RUNDIR }}"
+          set -a; . ./inputs.sh; set +a
+          bash "${app_dir}/inspect-head-node.sh" \
+               "${{ needs.preprocess.outputs.RUNDIR }}" "${app_dir}"
 
   # -------------------------------------------------------------------------
   # 3. Build on the LOGIN node: scheduler=false sends this down
@@ -473,7 +498,71 @@ jobs:
           echo "::notice::Build completed successfully"
 
   # -------------------------------------------------------------------------
-  # 5. Serve a placeholder endpoint.
+  # 5. Execute the built binaries ON A COMPUTE NODE.
+  #    The build runs on the login node, so a binary compiled for the login
+  #    node's ISA runs there perfectly and the build exits 0 either way. Run
+  #    fair-mastodon passed every recorded criterion with three GROMACS builds
+  #    carrying AVX-512 that its zen2 worker could not execute. Nothing short of
+  #    running the result on the target hardware can see that, which is why this
+  #    is a separate submitted job rather than a step in build or verify.
+  # -------------------------------------------------------------------------
+  exec_check:
+    needs:
+      - preprocess
+      - verify
+    steps:
+      - name: Run the built binaries on a compute node
+        uses: github/parallelworks/workflows@add-spack-builder
+        early-cancel: any-job-failed
+        with:
+          $yaml: workflows/script_submitter/v3.6/general.yaml
+          resource: ${{ inputs.cluster.resource }}
+          shebang: '#!/bin/bash'
+          rundir: ${{ needs.preprocess.outputs.EXEC_DIR }}
+          use_existing_script: true
+          script_path: ${{ needs.preprocess.outputs.EXEC_SCRIPT }}
+          define_cleanup_script: true
+          cleanup_script_path: ./cancel.sh
+          scheduler: ${{ inputs.cluster.scheduler }}
+          use_scheduler_agent: false
+          submit_and_exit: false
+          skip_cleanups_file: ''
+          slurm:
+            is_enabled: ${{ inputs.cluster.slurm.is_enabled }}
+            partition: ${{ inputs.cluster.slurm.partition }}
+            scheduler_directives: ${{ inputs.cluster.slurm.scheduler_directives }}
+            time: ${{ inputs.cluster.slurm.time }}
+            gpus: ${{ inputs.cluster.slurm.gpus }}
+          pbs:
+            is_enabled: ${{ inputs.cluster.pbs.is_enabled }}
+            scheduler_directives: ${{ inputs.cluster.pbs.scheduler_directives }}
+
+  # -------------------------------------------------------------------------
+  #    Same reason as job 4: script_submitter cannot report the exit status of
+  #    what it submitted, so the status file is the only signal that the check
+  #    actually passed rather than merely finished.
+  # -------------------------------------------------------------------------
+  exec_verify:
+    needs:
+      - preprocess
+      - exec_check
+    ssh:
+      remoteHost: ${{ inputs.cluster.resource.ip }}
+    steps:
+      - name: Confirm the binaries ran on the compute node
+        run: |
+          set -uo pipefail
+          STATUS_FILE="${{ needs.preprocess.outputs.EXEC_DIR }}/EXEC_STATUS"
+          st="$(cat "${STATUS_FILE}" 2>/dev/null || echo missing)"
+          echo "check-exec.sh exit status: ${st}"
+          if [ "${st}" != "0" ]; then
+            echo "::error title=Error::Execution check failed (status '${st}'). The built binaries did not run on the compute node -- see run.*.out in ${{ needs.preprocess.outputs.EXEC_DIR }}"
+            exit 1
+          fi
+          echo "::notice::Built binaries executed successfully on a compute node"
+
+  # -------------------------------------------------------------------------
+  # 6. Serve a placeholder endpoint.
   #    Nothing in the build needs this. The shared test runner
   #    (tools/tests/run-workflow-test.py) passes a run only when an endpoint
   #    named <service.name>-<run-slug> is listed and answers HTTP, so a workflow
@@ -487,7 +576,7 @@ jobs:
   endpoint:
     needs:
       - preprocess
-      - verify
+      - exec_verify
     steps:
       - name: Serve the placeholder endpoint
         uses: github/parallelworks/workflows@add-spack-builder
@@ -520,7 +609,7 @@ jobs:
           exit 1
 
   # -------------------------------------------------------------------------
-  # 6. Release the run once the endpoint answers, and leave it serving.
+  # 7. Release the run once the endpoint answers, and leave it serving.
   #    Touching SKIP_CLEANUP tells script_submitter not to run cancel.sh when
   #    the job is cancelled, so the endpoint outlives the run -- which is what
   #    the test runner checks before deleting it itself.

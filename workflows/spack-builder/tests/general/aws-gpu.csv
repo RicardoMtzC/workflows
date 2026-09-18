@@ -3,3 +3,4 @@ date,phase,result,cleanup,http,workflow_tree,submitter_tree,tools_tree,commit,fe
 2026-09-18T01:37:41Z,warm,fail,ok,,45c6166,436820d,e9e6033,56a921d,56a921d,add-spack-builder,pwdemo.stefan,darling-piglet,428,run canceled: Run darling-piglet: canceled (7m2s)
 2026-09-18T01:47:51Z,warm,fail,ok,,45c6166,436820d,e9e6033,56a921d,56a921d,add-spack-builder,pwdemo.stefan,quiet-kid,245,run canceled: Run quiet-kid: canceled (4m3s)
 2026-09-18T02:25:43Z,warm,pass,ok,307,4bf539e,436820d,e9e6033,5e21c99,5e21c99,add-spack-builder,pwdemo.stefan,fair-mastodon,2720,
+2026-09-18T12:21:46Z,warm,pass,ok,307,bbe5ea7,436820d,e9e6033,3baca5e,3baca5e,add-spack-builder,pwdemo.stefan,moral-silkworm,1959,
