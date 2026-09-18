@@ -239,6 +239,10 @@ tests/general/            recorded end-to-end test
 
 ## Known gaps and deferred work
 
+- **GROMACS 2025.4 +cuda builds against CUDA 13.2** — verified on gce2 run
+  `hopeful-haddock`: all four builds installed, the CPU three and
+  `gromacs@2025.4 +cuda cuda_arch=90` (~23 min each). The bump did what it was
+  meant to; what is still unverified is *running* those binaries on a GPU.
 - **GROMACS is 2025.4 because 2024.3 does not link against CUDA 13.** Verified on
   gce2 run `funky-pigeon`: GROMACS compiled with the right architecture
   (`compute_90`/`sm_90`) and then failed at link with a single unresolved symbol,
@@ -261,6 +265,12 @@ tests/general/            recorded end-to-end test
   differ from the same specs built by a CPU-only run and the two cannot share
   cache entries. CPU-only runs are untouched — the key is only added when the GPU
   path is active.
+- **The GPU path still has not completed a run**, now because of UCX rather than
+  GROMACS. On `hopeful-haddock` the standalone CUDA-aware OpenMPI failed: its
+  `^ucx@1.17.0 +verbs +rdmacm +dc` could not configure against an image whose
+  rdma-core external has no headers. That spec contradicted the gcp fragment's
+  own header comment, which documents the identical failure for the CPU path; it
+  is now `~verbs ~rdmacm ~dc +cuda +gdrcopy`, untested.
 - **GPU detection works; the GPU build has still not been run end to end.**
   Verified on gce2 (run `loving-firefly`): the inspection job reports
   `2x NVIDIA H100 80GB HBM3`, `cuda_arch=90`, driver `595.45.04`, driver CUDA
@@ -389,6 +399,14 @@ first multi-word value (`GPU_NAME=NVIDIA H100 80GB HBM3`) made line 8 parse as a
 assignment followed by the command `H100`, and `build.sh` aborted with status 127
 before running anything. `bash -n` does not catch this; writing the file with
 real values and sourcing it does.
+
+A failing `spack install` prints the tail of `spack-install.log` itself, not only
+the per-package logs Spack names. Those named paths point into the build stage,
+which Spack removes when `install` exits, so by the time the handler runs they
+are usually gone — on `hopeful-haddock` the loop found both paths and could read
+neither. Spack's own streamed excerpt of the failing build (the `>`-marked lines)
+is in `spack-install.log` and is what actually carried UCX's
+`configure: error: RDMACM requested but required file (rdma/rdma_cma.h)`.
 
 The integrity check compares **sizes**, not checksums: hashing a 1.4 GiB cache
 on every run costs minutes, and the failure it guards against — an interrupted

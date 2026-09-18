@@ -265,8 +265,18 @@ if ! spack -e "$ENV_DIR" install --no-check-signature -j"$JOBS" 2>&1 | tee "$INS
     grep -oE '^[^ ]+@[^ ]+/[^ :]+: +/[^ ]+\.log$' "$INSTALL_LOG" | awk '{print $NF}'
   } | sort -u | while read -r build_log; do
     printf '\n----- last 120 lines of %s -----\n' "$build_log"
-    tail -n 120 "$build_log" 2>/dev/null || echo "(build log not readable)"
+    tail -n 120 "$build_log" 2>/dev/null || \
+      echo "(gone -- Spack removes the build stage when install exits, so this path is usually already deleted by the time we read it)"
   done
+
+  # The reliable copy. Spack streams an excerpt of the failing package's build
+  # output into its own stdout as it fails, marked with '>', and that is in this
+  # file -- it is how ucx's "configure: error: RDMACM requested but required file
+  # (rdma/rdma_cma.h) could not be found" was read on gce2 run hopeful-haddock,
+  # while the stage log the loop above names had already been cleaned up. So
+  # print this unconditionally rather than relying on those paths surviving.
+  printf '\n----- last 150 lines of %s (Spack streamed output) -----\n' "$INSTALL_LOG"
+  tail -n 150 "$INSTALL_LOG"
   exit 1
 fi
 
