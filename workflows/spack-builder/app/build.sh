@@ -296,8 +296,16 @@ fi
 attempted="$(grep -c 'fetching from build cache' "$INSTALL_LOG" || true)"
 compiled="$(grep -c 'no binary available' "$INSTALL_LOG" || true)"
 extracted=$(( attempted - compiled ))
-external="$(grep -cE '^\[e\] ' "$INSTALL_LOG" || true)"
-log "Install complete: ${extracted} specs from the build cache, ${compiled} compiled from source, ${external} external"
+
+# A re-run installs nothing, and Spack then prints NOTHING at all -- not one
+# line -- so the three counters above are all zero and the log reads as though
+# the environment is empty (gce2 run welcome-deer, which passed). The total is a
+# direct measurement of what is installed now; "already" is the remainder, so
+# the four numbers always add up.
+present="$(spack -e "$ENV_DIR" find --format '{hash}' 2>/dev/null | wc -l)"
+already=$(( present - extracted - compiled ))
+[ "$already" -lt 0 ] && already=0
+log "Install complete: ${present} specs in the environment -- ${already} already installed, ${extracted} from the build cache, ${compiled} compiled from source"
 
 log "Pushing to the build cache at $BUILDCACHE_PATH"
 spack -e "$ENV_DIR" buildcache push --unsigned --update-index --private --allow-missing "$MIRROR_NAME" || true

@@ -6,3 +6,4 @@ date,phase,result,cleanup,http,workflow_tree,submitter_tree,tools_tree,commit,fe
 2026-09-17T23:51:04Z,warm,fail,ok,,ad9b3c0,436820d,e9e6033,865580b,865580b,add-spack-builder,pwdemo.stefan,hopeful-haddock,1652,"run error: verify > Confirm the build succeeded (error, 0s)"
 2026-09-18T01:23:44Z,warm,fail,ok,,d7f8f02,436820d,e9e6033,98ca593,98ca593,add-spack-builder,pwdemo.stefan,many-mako,291,"run error: verify > Confirm the build succeeded (error, 0s)"
 2026-09-18T01:37:37Z,warm,fail,ok,,45c6166,436820d,e9e6033,56a921d,56a921d,add-spack-builder,pwdemo.stefan,caring-warthog,1511,"run error: verify > Confirm the build succeeded (error, 0s)"
+2026-09-18T02:18:54Z,warm,pass,ok,307,4bf539e,436820d,e9e6033,5e21c99,5e21c99,add-spack-builder,pwdemo.stefan,welcome-deer,397,
