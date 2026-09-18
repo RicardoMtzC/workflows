@@ -95,6 +95,28 @@ def main(argv):
     # after 1h28m of compiling. A preference under `packages: all:` applies to
     # any package that HAS the variant and leaves the rest untouched, which is
     # the only place that reaches a dependency no spec mentions.
+    # A GPU environment contains a ~cuda and a +cuda build of the same
+    # name/version/compiler for openmpi, gromacs, fftw, hwloc and more, and the
+    # CPU projections name both identically -- so `module tcl refresh` aborts
+    # with "Name clashes detected in module files" AFTER a completely successful
+    # install (gce2 run caring-warthog: the whole GPU stack built and pushed,
+    # then the run failed on naming). Two changes, GPU builds only:
+    #   * a -cuda suffix, so a user can SEE which module is the CUDA build. The
+    #     ^mpi+cuda rule comes first because it is the more specific match, and
+    #     it also catches packages that are themselves ~cuda but linked against
+    #     the CUDA-aware MPI, like fftw.
+    #   * a hash suffix, because a suffix alone is not sufficient: pmix and prrte
+    #     appear twice with IDENTICAL variants, differing only in which hwloc
+    #     they were built against, and no projection can express that.
+    if gpu_active:
+        tcl = env["spack"]["modules"]["default"]["tcl"]
+        tcl["projections"] = {
+            "^mpi+cuda": "{name}/{version}-{^mpi.name}-{^mpi.version}-cuda",
+            "+cuda": "{name}/{version}-{compiler.name}-{compiler.version}-cuda",
+            **tcl.get("projections", {}),
+        }
+        tcl["hash_length"] = 7
+
     if gpu_active and cuda_arch:
         all_cfg = env["spack"]["packages"].setdefault("all", {})
         existing = all_cfg.get("variants", "")

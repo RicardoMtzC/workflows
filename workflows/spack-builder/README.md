@@ -171,6 +171,34 @@ overrides are rejected. Use `cuda-arch=none` to force a CPU-only build.
   filesystem shared between login and compute nodes. Keeping it in user space is
   what removes every `sudo` from this workflow.
 
+## Module names in a GPU build
+
+A GPU environment holds a `~cuda` and a `+cuda` build of the same
+name/version/compiler — `openmpi`, `gromacs`, `fftw`, `hwloc` and others — and
+the CPU projections name both identically, so `module tcl refresh` aborts with
+`Name clashes detected in module files`. That happens **after** a fully
+successful install, which is how `caring-warthog` managed to build and push the
+entire GPU stack and still fail.
+
+GPU builds therefore get two extra things, and CPU builds are untouched:
+
+```
+gromacs/2025.4-openmpi-5.0.10-cuda-<hash>     GPU build
+gromacs/2025.4-openmpi-5.0.10-<hash>          CPU build
+```
+
+- a **`-cuda` suffix**, so the CUDA build is visible at a glance. The `^mpi+cuda`
+  rule is listed first because it is the more specific match, and it also catches
+  packages that are themselves `~cuda` but linked against the CUDA-aware MPI,
+  such as `fftw`.
+- a **hash suffix** (`hash_length: 7`), because a suffix alone is not enough:
+  `pmix` and `prrte` each appear twice with *identical* variants, differing only
+  in which `hwloc` they were built against, and no projection can express that.
+
+Spack picks the first projection whose constraint the spec satisfies, in the
+order they are written, with `all` reserved as the fallback — see
+`get_projection` in `lib/spack/spack/projections.py`.
+
 ## After the build
 
 ```bash
@@ -239,10 +267,10 @@ tests/general/            recorded end-to-end test
 
 ## Known gaps and deferred work
 
-- **GROMACS 2025.4 +cuda builds against CUDA 13.2** — verified on gce2 run
-  `hopeful-haddock`: all four builds installed, the CPU three and
-  `gromacs@2025.4 +cuda cuda_arch=90` (~23 min each). The bump did what it was
-  meant to; what is still unverified is *running* those binaries on a GPU.
+- **The whole GPU stack builds.** Verified on gce2 run `caring-warthog`: UCX
+  1.19.1, `gdrcopy`, the CUDA-aware `openmpi@5.0.10 +cuda`, `fftw` against it and
+  `gromacs@2025.4 +cuda cuda_arch=90` all installed and pushed to the cache. What
+  is still unverified is *running* those binaries on a GPU.
 - **GROMACS is 2025.4 because 2024.3 does not link against CUDA 13.** Verified on
   gce2 run `funky-pigeon`: GROMACS compiled with the right architecture
   (`compute_90`/`sm_90`) and then failed at link with a single unresolved symbol,

@@ -283,13 +283,19 @@ fi
 # Did the cache do its job? The forecast above is a prediction; this is what
 # happened, and the two disagreeing is itself worth seeing.
 # Every number comes from this one install log, so they add up. Mixing in a
-# `spack find` count does not: it reports the environment's view (43 on aws)
-# against a DAG the forecast counted whole (66), and two disagreeing totals in
-# one log read as a bug in the run. "fetching from build cache" is Spack 1.2's
-# wording for a binary install, "==> Installing <name>-<version>-<hash>" for a
-# source build, and "[e]" for an external.
-extracted="$(grep -c 'fetching from build cache' "$INSTALL_LOG" || true)"
-compiled="$(grep -cE '^==> Installing ' "$INSTALL_LOG" || true)"
+# `spack find` count does not: it reports the environment's view against a DAG
+# the forecast counted whole, and two disagreeing totals in one log read as a bug
+# in the run.
+#
+# "fetching from build cache" is an ATTEMPT, not a success -- Spack prints it for
+# every spec and then follows with "no binary available" on a miss. Counting the
+# attempts as hits, and source builds by "==> Installing", reported "4 from the
+# build cache, 0 compiled" for a run that compiled four packages (gce2
+# caring-warthog): Spack 1.2's progress output has no "==> Installing" line at
+# all. Both numbers therefore come from the attempt/miss pair.
+attempted="$(grep -c 'fetching from build cache' "$INSTALL_LOG" || true)"
+compiled="$(grep -c 'no binary available' "$INSTALL_LOG" || true)"
+extracted=$(( attempted - compiled ))
 external="$(grep -cE '^\[e\] ' "$INSTALL_LOG" || true)"
 log "Install complete: ${extracted} specs from the build cache, ${compiled} compiled from source, ${external} external"
 
