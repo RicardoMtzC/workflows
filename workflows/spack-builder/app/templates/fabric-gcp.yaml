@@ -30,7 +30,7 @@
 # "+rdmacm +verbs" while its own rationale said GCP exposes OFI WITHOUT a classic
 # verbs device -- and that contradiction is not theoretical: on a GCE cluster
 # detection reports HAS_VERBS=0, the image ships neither
-# /usr/include/rdma/rdma_cma.h nor infiniband/verbs.h, and ucx@1.17.0 failed with
+# /usr/include/rdma/rdma_cma.h nor infiniband/verbs.h, and ucx@1.19.1 failed with
 #   configure: error: RDMACM requested but required file (rdma/rdma_cma.h)
 #   could not be found in /usr
 # The registered rdma-core external supplies runtime libraries only, not headers
@@ -77,8 +77,8 @@ fabric:
   # trap the header describes for the CPU path, reappearing on the GPU path
   # because only the versions were lifted into `packages:`, not the variants.
   cuda_aware_mpi_specs:
-  - openmpi +cuda schedulers=slurm fabrics=ofi,ucx ^libfabric ^ucx@1.17.0 ~verbs ~rdmacm ~dc +cuda +gdrcopy
+  - openmpi +cuda schedulers=slurm fabrics=ofi,ucx ^libfabric ^ucx@1.19.1 ~verbs ~rdmacm ~dc +cuda +gdrcopy
     ^cuda
   gromacs_gpu_specs:
   - gromacs@2025.4 +mpi +openmp +cuda cuda_arch=__CUDA_ARCH__ ^openmpi+cuda schedulers=slurm fabrics=ofi,ucx
-    ^ucx@1.17.0 ~verbs ~rdmacm ~dc +cuda +gdrcopy ^cuda ^fftw+openmp
+    ^ucx@1.19.1 ~verbs ~rdmacm ~dc +cuda +gdrcopy ^cuda ^fftw+openmp

@@ -45,6 +45,6 @@ fabric:
   - gromacs@2025.4 +mpi +openmp ~cuda ^mpich ^fftw+openmp
   - gromacs@2025.4 +mpi +openmp ~cuda ^intel-oneapi-mpi ^fftw+openmp
   cuda_aware_mpi_specs:
-  - openmpi +cuda schedulers=slurm fabrics=ofi,ucx ^libfabric ^ucx@1.17.0 +cuda +gdrcopy +rdmacm ^cuda
+  - openmpi +cuda schedulers=slurm fabrics=ofi,ucx ^libfabric ^ucx@1.19.1 +cuda +gdrcopy +rdmacm ^cuda
   gromacs_gpu_specs:
   - gromacs@2025.4 +mpi +openmp +cuda cuda_arch=__CUDA_ARCH__ ^openmpi+cuda ^cuda ^fftw+openmp

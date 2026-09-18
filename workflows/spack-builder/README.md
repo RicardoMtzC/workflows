@@ -266,11 +266,20 @@ tests/general/            recorded end-to-end test
   cache entries. CPU-only runs are untouched — the key is only added when the GPU
   path is active.
 - **The GPU path still has not completed a run**, now because of UCX rather than
-  GROMACS. On `hopeful-haddock` the standalone CUDA-aware OpenMPI failed: its
-  `^ucx@1.17.0 +verbs +rdmacm +dc` could not configure against an image whose
-  rdma-core external has no headers. That spec contradicted the gcp fragment's
-  own header comment, which documents the identical failure for the CPU path; it
-  is now `~verbs ~rdmacm ~dc +cuda +gdrcopy`, untested.
+  GROMACS. Two distinct UCX failures, one after the other:
+  1. `hopeful-haddock`: `^ucx@1.17.0 +verbs +rdmacm +dc` could not configure
+     against an image whose rdma-core external has no headers — the identical
+     failure the gcp fragment's own header documents for the CPU path, which its
+     GPU spec then asked for anyway. Fixed to `~verbs ~rdmacm ~dc +cuda +gdrcopy`.
+  2. `many-mako`: with the RDMA transports gone UCX configured and reached the
+     compile, then failed on CUDA 13:
+     `cuda_copy_md.c:405:5: error: unknown type name 'PFN_cuMemGetHandleForAddressRange';
+     did you mean 'PFN_cuMemGetHandleForAddressRange_v11070'?` — CUDA 13 dropped
+     the unsuffixed typedef and UCX 1.17.0 predates it. **UCX is now 1.19.1**,
+     across all five fragments, the same reasoning that moved GROMACS to 2025.4.
+     Note that bump touches the azure and oracle fragments, whose UCX-over-verbs
+     paths remain untested on real InfiniBand; leaving them on a pin known to be
+     incompatible with CUDA 13 seemed the worse of the two risks.
 - **GPU detection works; the GPU build has still not been run end to end.**
   Verified on gce2 (run `loving-firefly`): the inspection job reports
   `2x NVIDIA H100 80GB HBM3`, `cuda_arch=90`, driver `595.45.04`, driver CUDA
