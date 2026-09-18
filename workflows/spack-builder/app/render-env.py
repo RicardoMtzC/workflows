@@ -95,6 +95,25 @@ def main(argv):
     # after 1h28m of compiling. A preference under `packages: all:` applies to
     # any package that HAS the variant and leaves the rest untouched, which is
     # the only place that reaches a dependency no spec mentions.
+    # Reuse must be constrained to the chosen target, or it silently defeats it.
+    # `packages: all: target:` is a PREFERENCE, and `reuse: true` outranks a
+    # preference: an installed spec for a different microarchitecture satisfies
+    # the request, so Spack takes it. On aws run fair-mastodon the target
+    # resolved correctly to x86_64_v3 for a zen2 worker, and the environment
+    # still came out with 45 skylake_avx512 specs -- fftw, gcc-runtime, curl and
+    # the three CPU gromacs builds -- reused wholesale from the Intel login
+    # node's earlier CPU stack. Those carry AVX-512 and cannot execute on zen2,
+    # so the run "passed" with a stack that would SIGILL on the nodes it was
+    # built for. Nothing in the pass criteria can see that.
+    #
+    # `include` keeps reuse working for everything already at the right target
+    # (which is the normal redeploy case, where it is the whole point) and
+    # forbids it for everything else, from the local install tree and the build
+    # cache alike.
+    env["spack"].setdefault("concretizer", {})["reuse"] = {
+        "include": ["target=%s" % target]
+    }
+
     # A GPU environment contains a ~cuda and a +cuda build of the same
     # name/version/compiler for openmpi, gromacs, fftw, hwloc and more, and the
     # CPU projections name both identically -- so `module tcl refresh` aborts

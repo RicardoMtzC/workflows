@@ -47,6 +47,30 @@ decision explicit:
 - **Different CPU family** (x86_64 login, aarch64 workers) → no target serves
   both, so the build **fails** rather than producing binaries that cannot run.
 
+**Requesting the target is not enough — reuse has to be constrained too.**
+`packages: all: target:` is a preference, and `reuse: true` outranks a
+preference: an installed spec built for a different microarchitecture still
+satisfies the request, so Spack takes it rather than building. On aws run
+`fair-mastodon` the resolver correctly chose `x86_64_v3` for a `zen2` worker and
+the environment *still* came out holding 45 `skylake_avx512` specs — `fftw`,
+`gcc-runtime`, `curl` and all three CPU GROMACS builds — reused from the Intel
+login node's earlier CPU stack. Those carry AVX-512 and cannot execute on zen2.
+The run passed: it completed, the endpoint answered, and nothing in the pass
+criteria can see a wrong-ISA binary.
+
+The environment therefore pins reuse to the chosen target:
+
+```yaml
+concretizer:
+  reuse:
+    include:
+    - target=<the resolved target>
+```
+
+Reuse still does its job in the normal redeploy case, where everything cached is
+already at the right target, and is refused for everything else — from the local
+install tree and the build cache alike.
+
 The third case is not hypothetical and is the one that bites. On `aws` the login
 node is a `c5n.9xlarge` (Intel `skylake_avx512`) while the GPU partitions are
 `g6`/`g5` — AMD EPYC, `zen3`. AVX-512 is not a *subset* of zen3, it is **absent**

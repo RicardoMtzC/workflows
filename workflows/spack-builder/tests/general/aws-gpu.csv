@@ -2,3 +2,4 @@ date,phase,result,cleanup,http,workflow_tree,submitter_tree,tools_tree,commit,fe
 2026-09-18T01:20:59Z,warm,fail,leftover:proc:pw endpoints+proc:spack install+proc:http.server,,c301540,436820d,e9e6033,ae6133c,ae6133c,add-spack-builder,pwdemo.stefan,wondrous-phoenix,794,run canceled: Run wondrous-phoenix: canceled (13m8s)
 2026-09-18T01:37:41Z,warm,fail,ok,,45c6166,436820d,e9e6033,56a921d,56a921d,add-spack-builder,pwdemo.stefan,darling-piglet,428,run canceled: Run darling-piglet: canceled (7m2s)
 2026-09-18T01:47:51Z,warm,fail,ok,,45c6166,436820d,e9e6033,56a921d,56a921d,add-spack-builder,pwdemo.stefan,quiet-kid,245,run canceled: Run quiet-kid: canceled (4m3s)
+2026-09-18T02:25:43Z,warm,pass,ok,307,4bf539e,436820d,e9e6033,5e21c99,5e21c99,add-spack-builder,pwdemo.stefan,fair-mastodon,2720,
