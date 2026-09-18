@@ -195,6 +195,30 @@ overrides are rejected. Use `cuda-arch=none` to force a CPU-only build.
   filesystem shared between login and compute nodes. Keeping it in user space is
   what removes every `sudo` from this workflow.
 
+## Where the modules go, and holding several stacks
+
+The module tree root is the `module_root` form input (default
+`${HOME}/pw/software/modules`), not a fixed path under the Spack root, because a
+cluster is expected to hold more than one stack.
+
+Spack keys the tree by **spec** architecture — `<root>/<platform>-<os>-<target>`
+— so stacks built for different targets already separate themselves. Point
+separate stacks at separate roots when you want them independent beyond that.
+
+Two things were wrong here and are now fixed:
+
+- **`module tcl refresh --delete-tree` wiped other stacks.** `--delete-tree`
+  deletes the whole tree and regenerates only the current environment's specs, so
+  building a CPU stack removed the GPU stack's modules from the same root while
+  leaving its installs in place — run `powerful-jaguar` erased the modules
+  `moral-silkworm` had written that morning. The refresh no longer passes it.
+- **The "DONE" banner printed the wrong `MODULEPATH`.** It was built from
+  `spack arch`, which reports the *login node*, while modules are written under
+  the *spec's* architecture. On a cross-architecture cluster — the case this
+  workflow exists for — those differ: `moral-silkworm` built `x86_64_v3` and told
+  users to add the `skylake_avx512` directory, which held none of its modules. It
+  is now composed from the resolved target.
+
 ## Module names in a GPU build
 
 A GPU environment holds a `~cuda` and a `+cuda` build of the same
@@ -211,10 +235,36 @@ gromacs/2025.4-openmpi-5.0.10-cuda-<hash>     GPU build
 gromacs/2025.4-openmpi-5.0.10-<hash>          CPU build
 ```
 
-- a **`-cuda` suffix**, so the CUDA build is visible at a glance. The `^mpi+cuda`
-  rule is listed first because it is the more specific match, and it also catches
-  packages that are themselves `~cuda` but linked against the CUDA-aware MPI,
-  such as `fftw`.
+- a **`-cuda` suffix**, which means exactly one thing: *this package is
+  CUDA-enabled*. The constraint is `+cuda` on the package itself.
+
+  It must **not** be written `^mpi+cuda`. A variant constraint on a *virtual* is
+  silently dropped, so that degenerates to `^mpi` and matches every MPI build:
+
+  ```
+  ^mpi+cuda      → dtymywh dzhjyzk tf5yvlt 7izjiju   (all four — wrong)
+  ^openmpi+cuda  → tf5yvlt 7izjiju                   (concrete provider — correct)
+  +cuda          → 7izjiju                           (the package itself)
+  ```
+
+  Run `moral-silkworm` consequently labelled its `mpich~cuda` and
+  `intel-oneapi-mpi` GROMACS builds `-cuda`, though neither they nor their MPI
+  had any CUDA — three of four builds mismarked, the opposite of the point.
+  Constrain the concrete provider, or the package, and matching behaves.
+
+  Two rules, in this order: `+cuda ^mpi` first, so a CUDA-enabled package that
+  links an MPI keeps the MPI in its name; then `+cuda` alone, which catches the
+  CUDA-aware MPIs themselves — they *provide* mpi rather than depend on it, so
+  they never match the first rule. The result carries one suffix per genuinely
+  CUDA-enabled spec:
+
+  ```
+  gromacs/2025.4-openmpi-5.0.10-cuda-7izjiju    gromacs+cuda
+  gromacs/2025.4-openmpi-5.0.10-tf5yvlt         gromacs~cuda on CUDA-aware openmpi
+  gromacs/2025.4-mpich-4.2.2-dzhjyzk            gromacs~cuda
+  openmpi/5.0.10-gcc-14.2.0-cuda-uoyrl2w        openmpi+cuda
+  mpich/4.2.2-gcc-14.2.0-embhosw                no CUDA anywhere
+  ```
 - a **hash suffix** (`hash_length: 7`), because a suffix alone is not enough:
   `pmix` and `prrte` each appear twice with *identical* variants, differing only
   in which `hwloc` they were built against, and no projection can express that.

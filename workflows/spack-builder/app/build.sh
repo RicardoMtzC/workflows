@@ -146,7 +146,13 @@ fi
 # ---------------------------------------------------------------------------
 log "Rendering environment -> $ENV_DIR/spack.yaml"
 mkdir -p "$ENV_DIR"
-MODULE_ROOT="$SPACK_ROOT/share/spack/modules"
+# A cluster is expected to hold SEVERAL stacks -- a CPU one and a GPU one, or
+# stacks for different targets -- so the module tree is a form input rather than
+# a fixed path under the Spack root. Spack keys the tree by spec architecture
+# (<root>/<platform>-<os>-<target>), so differing targets already separate
+# themselves; a separate root is for keeping stacks independent beyond that.
+MODULE_ROOT="${service_module_root:-$SPACK_ROOT/share/spack/modules}"
+mkdir -p "$MODULE_ROOT"
 
 RENDER_OUT="$(spack python "$APP_DIR/render-env.py" \
       "$FRAG" "$APP_DIR/templates/spack.yaml.in" "$ENV_DIR/spack.yaml" \
@@ -321,9 +327,18 @@ log "Refreshing modules"
 MODULE_EXCLUDES="$(spack python "$APP_DIR/external-modules.py" "$ENV_DIR/spack.lock")"
 log "Excluding from modules (externals): $MODULE_EXCLUDES"
 spack -e "$ENV_DIR" config add "modules:default:tcl:exclude:[${MODULE_EXCLUDES}]"
-spack -e "$ENV_DIR" module tcl refresh --delete-tree -y
+# NOT --delete-tree: that deletes the WHOLE tree and regenerates only this
+# environment's specs, so building a CPU stack silently removed the GPU stack's
+# modules from the same root even though its installs were untouched (the GPU
+# modules from run moral-silkworm were gone after run powerful-jaguar). Refresh
+# without it and each stack's modules persist alongside the others.
+spack -e "$ENV_DIR" module tcl refresh -y
 
-MODROOT="$MODULE_ROOT/$(spack arch)"
+# `spack arch` reports the LOGIN node, but the modules are written under the
+# spec's architecture -- and on a cross-architecture cluster, which is the case
+# this workflow exists for, those differ. Run moral-silkworm built x86_64_v3 and
+# printed a skylake_avx512 MODULEPATH that held none of its modules.
+MODROOT="$MODULE_ROOT/$(spack arch -p)-$(spack arch -o)-${TARGET}"
 cat <<EOF
 
 === DONE ===

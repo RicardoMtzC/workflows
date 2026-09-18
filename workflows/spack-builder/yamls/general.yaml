@@ -162,6 +162,16 @@ permissions: ['*']
             tooltip: >-
               Directory-backed Spack mirror. Every package built here is pushed to it,
               and later runs install from it instead of recompiling.
+          module_root:
+            type: string
+            label: Module tree root
+            default: ${HOME}/pw/software/modules
+            tooltip: >-
+              Where Spack writes the TCL module tree. Modules land in
+              <root>/<platform>-<os>-<target>, so stacks built for different
+              microarchitectures already land side by side; point separate stacks
+              at separate roots to keep them fully independent. Leave blank to use
+              <Spack root>/share/spack/modules.
           build_jobs:
             type: number
             label: Parallel build jobs (-j)
@@ -279,6 +289,7 @@ jobs:
           service_buildcache_path="${{ inputs.service.buildcache_path }}"
           service_build_jobs="${{ inputs.service.build_jobs }}"
           service_build_gpu="${{ inputs.service.build_gpu }}"
+          service_module_root="${{ inputs.service.module_root }}"
           service_concretize_only="${{ inputs.service.concretize_only }}"
           service_use_public_buildcache="${{ inputs.service.use_public_buildcache }}"
           OVERRIDE_TARGET="${{ inputs.service.use_overrides && inputs.service.override_target || '' }}"

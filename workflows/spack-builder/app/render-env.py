@@ -120,17 +120,26 @@ def main(argv):
     # with "Name clashes detected in module files" AFTER a completely successful
     # install (gce2 run caring-warthog: the whole GPU stack built and pushed,
     # then the run failed on naming). Two changes, GPU builds only:
-    #   * a -cuda suffix, so a user can SEE which module is the CUDA build. The
-    #     ^mpi+cuda rule comes first because it is the more specific match, and
-    #     it also catches packages that are themselves ~cuda but linked against
-    #     the CUDA-aware MPI, like fftw.
+    #   * a -cuda suffix, so a user can SEE which module is the CUDA build. It
+    #     marks exactly one thing: THIS package is CUDA-enabled. The constraint
+    #     is `+cuda` on the package itself -- NOT `^mpi+cuda`, which was the
+    #     first attempt and silently mislabelled three builds in four. A variant
+    #     constraint on a VIRTUAL is dropped, so `^mpi+cuda` degenerates to
+    #     `^mpi` and matched every MPI build: run moral-silkworm named its
+    #     mpich~cuda and intel-oneapi-mpi GROMACS "-cuda" although neither they
+    #     nor their MPI had CUDA at all. Constrain the concrete provider, or the
+    #     package, and matching behaves.
+    #     `+cuda ^mpi` (package is CUDA-enabled AND links an MPI) comes first so
+    #     such a package keeps the MPI in its name; `+cuda` alone then catches
+    #     the CUDA-aware MPIs themselves, which PROVIDE mpi rather than depend
+    #     on it and so never match the first rule.
     #   * a hash suffix, because a suffix alone is not sufficient: pmix and prrte
     #     appear twice with IDENTICAL variants, differing only in which hwloc
     #     they were built against, and no projection can express that.
     if gpu_active:
         tcl = env["spack"]["modules"]["default"]["tcl"]
         tcl["projections"] = {
-            "^mpi+cuda": "{name}/{version}-{^mpi.name}-{^mpi.version}-cuda",
+            "+cuda ^mpi": "{name}/{version}-{^mpi.name}-{^mpi.version}-cuda",
             "+cuda": "{name}/{version}-{compiler.name}-{compiler.version}-cuda",
             **tcl.get("projections", {}),
         }
