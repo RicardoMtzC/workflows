@@ -55,10 +55,9 @@ ENV_DIR="${env_dir:?env_dir not set by inputs.sh}"
 log "spack target here: $(spack arch -t 2>/dev/null || echo '?')"
 log "environment:       ${ENV_DIR}"
 
-# `spack find --format {prefix}` rather than module load: modules are refreshed
-# by the build and a name clash there would mask what we are trying to test.
-prefixes="$(spack -e "$ENV_DIR" find --format '{prefix}' gromacs 2>/dev/null)"
-if [ -z "$prefixes" ]; then
+# Hash AND prefix: the hash is what addresses the spec for `spack load`, below.
+specs="$(spack -e "$ENV_DIR" find --format '{hash} {prefix}' gromacs 2>/dev/null)"
+if [ -z "$specs" ]; then
   printf '::error title=Error::no gromacs installs found in %s\n' "$ENV_DIR" >&2
   exit 1
 fi
@@ -123,7 +122,25 @@ report_ok() {
   printf '%s\n' "$1" | grep -iE 'GROMACS version|SIMD instructions|GPU support|MPI library:' | sed 's/^/    /'
 }
 
-for prefix in $prefixes; do
+# Run a binary with the package's OWN run environment, as `spack load` or the
+# module would give a user. Invoking the bare path is not representative and
+# produces false failures: intel-oneapi-mpi needs FI_PROVIDER_PATH to find the
+# libfabric providers it ships, and without it MPI_Init aborts with
+# "OFI fi_getinfo() failed ... No data available" on a perfectly good binary.
+# `spack load --sh` is used rather than `module load` deliberately -- it emits
+# the same environment without touching the TCL module tree, whose name clashes
+# in a GPU build would otherwise mask what this check is testing.
+in_pkg_env() {
+  local hash="$1" bin="$2" env_sh
+  ( env_sh="$(spack -e "$ENV_DIR" load --sh "/$hash" 2>/dev/null || true)"
+    [ -n "$env_sh" ] && eval "$env_sh"
+    "$bin" -version 2>&1 )
+}
+
+# `<<<` not a pipe: a `while` in a pipeline runs in a subshell and the failure
+# counters incremented inside it would be discarded at the end of the loop.
+while read -r hash prefix; do
+  [ -n "${prefix:-}" ] || continue
   bin=""
   for cand in "${prefix}/bin/gmx_mpi" "${prefix}/bin/gmx"; do
     [ -x "$cand" ] && { bin="$cand"; break; }
@@ -138,7 +155,7 @@ for prefix in $prefixes; do
 
   # -version runs the binary and prints the SIMD level it was compiled for,
   # which is precisely the value that must match this node.
-  out="$( "$bin" -version 2>&1 )"
+  out="$( in_pkg_env "$hash" "$bin" )"
   rc=$?
 
   # SIGILL is the whole point of this check and is never retried: the binary
@@ -159,7 +176,9 @@ for prefix in $prefixes; do
 
   if launcher="$(launcher_for "$bin")"; then
     log "exit ${rc} standalone; retrying under $(basename "$launcher") (MPI singleton init is not supported by every MPI)"
-    out2="$( "$launcher" -n 1 "$bin" -version 2>&1 )"
+    out2="$( env_sh="$(spack -e "$ENV_DIR" load --sh "/$hash" 2>/dev/null || true)"
+             [ -n "$env_sh" ] && eval "$env_sh"
+             "$launcher" -n 1 "$bin" -version 2>&1 )"
     rc2=$?
     if [ $rc2 -eq 0 ]; then
       report_ok "$out2"
@@ -184,7 +203,7 @@ for prefix in $prefixes; do
   printf '%s\n' "$out" | tail -15 | sed 's/^/    /'
   printf '::warning title=Built binary did not run here::%s exited %s on %s and no MPI launcher was found for it\n' \
     "$bin" "$rc" "$(hostname)"
-done
+done <<< "$specs"
 
 printf '\n=== [exec] checked %s binaries: %s ISA failures, %s environment failures ===\n' \
   "$checked" "$isa_failures" "$other_failures"

@@ -384,7 +384,18 @@ that runs where the build ran proves nothing, because that is the node whose ISA
 the binaries wrongly match.
 
 `app/check-exec.sh` runs `gmx_mpi -version` for every GROMACS install in the
-environment and separates two verdicts, which mean different things:
+environment, **under that package's own run environment** (`spack load --sh`),
+and separates two verdicts, which mean different things:
+
+Running the bare binary path is not representative and produces false failures.
+`intel-oneapi-mpi` needs `FI_PROVIDER_PATH` to locate the libfabric providers it
+ships; without it `MPI_Init` aborts with `OFI fi_getinfo() failed ... No data
+available` on a binary that is completely sound -- run `powerful-jaguar` reported
+exactly that, and setting the variable made the same binary run. `spack load --sh`
+is used rather than `module load` deliberately: it produces the same environment
+without touching the TCL module tree, whose name clashes in a GPU build are the
+reason modules are avoided here at all.
+
 
 - **SIGILL (exit 132)** -- the binary cannot execute on this CPU. This is the
   fault the job exists to catch, and it fails the run.
