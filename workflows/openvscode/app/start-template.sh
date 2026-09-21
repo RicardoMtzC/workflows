@@ -47,7 +47,18 @@ fi
 # random subdomain per run throws that state away. Pin the subdomain instead;
 # path-based endpoints (--no-subdomain) already have a stable origin.
 if ! printf '%s' "${pw_endpoints_args}" | grep -q -- '--no-subdomain'; then
+    if [ "${resource_namespace}" = "undefined" ]; then
+        resource_namespace=""
+    fi
+    if [ "${resource_name}" = "undefined" ]; then
+        resource_name=""
+    fi
     if [ -z "${service_subdomain}" ] || [ "${service_subdomain}" = "undefined" ]; then
+        # Without resource_name the default is the same for every cluster, so only one session could start.
+        if [ -z "${resource_name}" ]; then
+            echo "::error title=Error::No Subdomain given and resource_name is empty, so the default subdomain would be the same for every cluster. Pass resource_name and resource_namespace from the workflow YAML's Create Inputs step, or set the Subdomain input"
+            exit 1
+        fi
         service_subdomain="vscode-${resource_namespace}-${resource_name}-${PW_USER}"
     fi
     service_subdomain=$(printf '%s' "${service_subdomain}" | tr '[:upper:]' '[:lower:]' \
