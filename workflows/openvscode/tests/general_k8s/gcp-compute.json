@@ -17,6 +17,7 @@
     }
   },
   "service": {
-    "directory": "${HOME}"
+    "directory": "${HOME}",
+    "subdomain": "vscode-test-general-k8s-gcpsmall"
   }
 }
