@@ -54,9 +54,9 @@ if ! printf '%s' "${pw_endpoints_args}" | grep -q -- '--no-subdomain'; then
         resource_name=""
     fi
     if [ -z "${service_subdomain}" ] || [ "${service_subdomain}" = "undefined" ]; then
-        # Without resource_name the default is the same for every cluster, so only one session could start.
+        # resource_name is what separates two clusters in a namespace, so without it the default can collide.
         if [ -z "${resource_name}" ]; then
-            echo "::error title=Error::No Subdomain given and resource_name is empty, so the default subdomain would be the same for every cluster. Pass resource_name and resource_namespace from the workflow YAML's Create Inputs step, or set the Subdomain input"
+            echo "::error title=Error::No Subdomain given and resource_name is empty, so the default subdomain cannot be made unique per cluster. Pass resource_name and resource_namespace from the workflow YAML's Create Inputs step, or set the Subdomain input"
             exit 1
         fi
         service_subdomain="vscode-${resource_namespace}-${resource_name}-${PW_USER}"
