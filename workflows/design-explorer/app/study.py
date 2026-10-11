@@ -13,8 +13,8 @@ Two layouts are read, told apart by what DIR holds:
 
 A case directory is one evaluation: params.in (the design, one "<value> <name>"
 line per variable) goes in; results.out (the outputs, the same format) or
-exit_code without it (the evaluation failed) comes out, with images/*.png when
-the evaluator renders any. A case with neither results.out nor exit_code has not
+exit_code without it (the evaluation failed) comes out, with images/* (MEDIA: pictures and
+animations) when the evaluator renders any. A case with neither results.out nor exit_code has not
 run yet (PENDING). Every value of results.out is an output, except the pair
 workflows/openfoam-naca writes (drag_coefficient, neg_lift_coefficient), which
 reads as the drag and lift coefficients and their ratio; its images come first,
@@ -33,13 +33,20 @@ same table on every request. Standard library only.
 import argparse
 import csv
 import glob
+import json
 import os
 import re
+import stat
 import sys
+import time
 
 # the images workflows/openfoam-naca renders, offered first and in this order;
-# any other images/*.png of a case follows, by name
+# any other images/* of a case follows, by name
 KNOWN_IMAGES = ("pressure", "velocity", "streamlines", "turbulence", "wake", "mesh")
+# what a case may leave in images/: pictures, and animations (gif, mp4, webm)
+MEDIA = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".mp4", ".webm")
+# seconds a picture or animation must sit unwritten before it is listed
+SETTLE = 3
 
 
 def read_pairs(path):
@@ -103,11 +110,51 @@ def outputs_of(results):
     return list(results)
 
 
-def image_names(case_dir):
-    names = [os.path.splitext(os.path.basename(p))[0]
-             for p in glob.glob(os.path.join(case_dir, "images", "*.png"))]
+def media_entries(case_dir):
+    """(file name, mtime) of every picture or animation in a case's images/."""
+    out = []
+    for p in glob.glob(os.path.join(case_dir, "images", "*")):
+        if os.path.splitext(p)[1].lower() not in MEDIA:
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            out.append((os.path.basename(p), st.st_mtime))
+    return out
+
+
+def settled(mtime, now):
+    """Not written to in the last SETTLE seconds: a picture or an animation
+    the evaluator is still writing is left out until it is whole, so that no
+    reader takes (and a browser caches) half of it."""
+    return not 0 <= now - mtime < SETTLE
+
+
+def image_files(case_dir, entries=None):
+    """{kind: file name} of a case's settled images/: the kind is the file's
+    stem, or its whole name when two files share a stem (pressure.png,
+    pressure.mp4)."""
+    now = time.time()
+    entries = media_entries(case_dir) if entries is None else entries
+    files = sorted(f for f, mtime in entries if settled(mtime, now))
+    stems = [os.path.splitext(f)[0] for f in files]
+    return dict((stem if stems.count(stem) == 1 else f, f) for stem, f in zip(stems, files))
+
+
+def image_names(files):
+    """The kinds of image_files(), the known ones first."""
+    names = list(files)
     known = [n for n in KNOWN_IMAGES if n in names]
     return known + sorted(n for n in names if n not in known)
+
+
+def mtime(path):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0
 
 
 def collect(cases_dir):
@@ -129,12 +176,18 @@ def collect(cases_dir):
             status = "FAILED"
         else:
             status = "PENDING"
+        entries = media_entries(case_dir)
+        files = image_files(case_dir, entries)
         images = {}
-        for image in image_names(case_dir):
-            images[image] = "%s/images/%s.png" % (name, image)
+        for image in image_names(files):
+            images[image] = "%s/images/%s" % (name, files[image])
+        # the case's last write: its outputs, or an image (images come after
+        # the outputs: a solved case may still be rendering)
+        changed = max([mtime(os.path.join(case_dir, "results.out")), mtime(os.path.join(case_dir, "exit_code"))]
+                      + [m for _, m in entries])
         rows.append({"case": name, "generation": generation, "inputs": inputs,
                      "outputs": outputs, "objectives": objectives, "status": status,
-                     "exit_code": exit_code, "images": images})
+                     "exit_code": exit_code, "images": images, "changed": changed})
     return rows
 
 
@@ -249,6 +302,45 @@ def write_design_explorer_csv(rows, path):
     os.replace(tmp, path)
 
 
+def read_json(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def optimization(rows, cases_dir):
+    """What the page's Pareto view needs beyond data.csv, from the optimizer's
+    own files: the objectives as data.csv columns with their sense (Dakota
+    minimizes each one; openfoam-naca's neg_lift_coefficient shows as the lift,
+    maximized), the variable bounds, and the hypervolume per generation."""
+    problem = read_json(os.path.join(cases_dir, "problem.json")) or {}
+    state = read_json(os.path.join(cases_dir, "state.json")) or {}
+    outputs = output_names(rows, every=True)
+    names = problem.get("objectives") or ordered_names(
+        dict(r["objectives"]) for r in rows if r["status"] == "OK")
+    objectives = []
+    for name in names:
+        if name in outputs:
+            objectives.append({"key": "out:" + name, "sense": "min", "name": name})
+        elif name.startswith("neg_") and name[4:] in outputs:
+            objectives.append({"key": "out:" + name[4:], "sense": "max", "name": name})
+    bounds = {}
+    for item in problem.get("variables") or []:
+        try:
+            bounds["in:" + str(item[0])] = [float(item[1]), float(item[2])]
+        except (IndexError, TypeError, ValueError):
+            continue
+    hv = []
+    for value in state.get("hv_history") or []:
+        try:
+            hv.append(float(value))
+        except (TypeError, ValueError):
+            hv.append(None)
+    return {"objectives": objectives, "bounds": bounds, "hypervolume": hv}
+
+
 def summary(rows, cases_dir=None):
     """The counts, and whether the study has finished: a design of experiments
     when no case is pending, an optimization when the optimizer's status is
@@ -258,6 +350,10 @@ def summary(rows, cases_dir=None):
         counts[row["status"]] += 1
     s = {"total": len(rows), "ok": counts["OK"], "failed": counts["FAILED"],
          "pending": counts["PENDING"], "images": sum(1 for r in rows if r["images"]),
+         "media": sum(len(r["images"]) for r in rows if r["status"] == "OK"),
+         # seconds since a case last wrote anything: a page keeps reading a
+         # finished study while its last images may still be rendering
+         "quiet": int(time.time() - max([r["changed"] for r in rows] + [0])) if rows else None,
          "layout": "doe", "generation": 0, "study_status": ""}
     if cases_dir is not None and layout(cases_dir) == "optimization":
         s["layout"] = "optimization"
@@ -267,6 +363,7 @@ def summary(rows, cases_dir=None):
                 s["study_status"] = fh.read().strip()
         except OSError:
             s["study_status"] = ""
+        s["optimization"] = optimization(rows, cases_dir)
         s["final"] = s["study_status"] in ("CONVERGED", "FAILED")
         s["state"] = ("complete" if s["study_status"] == "CONVERGED" else
                       "failed" if s["study_status"] == "FAILED" else "running")
