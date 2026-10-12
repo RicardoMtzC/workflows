@@ -46,31 +46,46 @@ workflow run any `pw` command the user who launched it can run.
 
 ## Golden rules
 
-- **Reuse the endpoint pattern and `script_submitter`; plain DAGs for the rest.**
-  For a web service, copy the repo's endpoint pattern: preprocessing checks out the
-  code, `script_submitter` (`v3.6`) submits the start script, the start script runs
-  the service under `pw endpoints run`, and a `wait_for_endpoint` job confirms it.
-  For "just run a script/sim on a cluster," call `script_submitter` directly. Do
-  **not** hand-write job submission, port allocation, or tunnel logic. Pure
-  orchestration (multi-job DAG, data flow, fan-out) needs **no** subworkflow — that's
-  a first-class use. Learn the patterns from the **repo's own workflows and
-  tutorials**, not from invented demos (reference §9): endpoints →
-  `workflows/{webshell,jupyterlab,openvscode}/`; **Singularity/SIF services →
-  `workflows/streamlit/` (simple) and `workflows/kasmvnc/` (multi-impl)**, delivery and
-  gotchas in [references/software/singularity-sif-containers.md](references/software/singularity-sif-containers.md); job DAG / outputs
-  → `tutorials/endpoint-workflows/` (staged README); **fan-out / sweep →
-  `tutorials/endpoint-workflows/05-matrix.yaml`**; retry/failover →
-  `tutorials/endpoint-workflows/07-failover.yaml`; **iterative loop over computed
-  cases (retry-as-loop + guarded static matrix) → `tutorials/optimization/`**;
-  **Kubernetes** (no script_submitter,
-  no login node) → [references/k8s-workflows.md](references/k8s-workflows.md).
-- **Pick the deployment variant by platform host — don't default to `general`.**
-  `script_submitter` ships as `general` / `emed` / `hsp` / `noaa`, and
-  the **resource/scheduler/slurm/pbs form sections differ between them**. Choose:
-  `emed` for `cluster.einsteinmed.edu`, `noaa` for `noaa.parallel.works`, `hsp` for
-  `activate.hpc.mil`, `general` otherwise — **if unclear, ask the user.** Then copy the
-  cluster/slurm/pbs form and `with:` block from the matching
-  `workflows/<name>/yamls/<variant>.yaml`. (`pw context list` shows the host.)
+- **Compose from standalone workflows; plain DAGs for the rest.** The repo's
+  workflows are building blocks, called as subworkflows (reference §3):
+  `script_submitter` (`v3.6`) runs a script on a resource, `wait_for_endpoint` waits
+  until an endpoint answers, `doe` samples designs, `dakota` proposes the next batch,
+  `openfoam-naca` solves one design, `design-explorer` serves a study. A web service
+  copies the endpoint pattern: preprocessing checks out the code, `script_submitter`
+  submits the start script, which runs the service under `pw endpoints run`, and a
+  `wait_for_endpoint` job confirms it. "Run a script on a cluster" calls
+  `script_submitter` directly. Do **not** hand-write job submission, port allocation
+  or tunnel logic. Write a new workflow so it can be called in turn: it does one
+  thing, its form is its interface, the paths it reads and writes are inputs, and it
+  runs on its own from the platform. Composing them takes a YAML with no code of its
+  own (`doe-openfoam`, `dakota-openfoam`). Pure orchestration (multi-job DAG, data
+  flow, fan-out) needs **no** subworkflow — that's a first-class use.
+- **Learn the patterns from the repo's own workflows and tutorials, not from
+  invented demos** (reference §9): endpoints →
+  `workflows/{webshell,jupyterlab,openvscode}/`; Singularity/SIF services →
+  `workflows/streamlit/` (simple) and `workflows/kasmvnc/` (multi-impl), delivery and
+  gotchas in [references/software/singularity-sif-containers.md](references/software/singularity-sif-containers.md);
+  job DAG / outputs → `tutorials/endpoint-workflows/` (staged README); fan-out /
+  sweep → `tutorials/endpoint-workflows/05-matrix.yaml`; retry/failover →
+  `tutorials/endpoint-workflows/07-failover.yaml`; iterative loop over computed cases
+  (retry-as-loop + guarded static matrix) → `tutorials/optimization/`; composition
+  (sampler or optimizer → matrix of evaluators → live page) →
+  `workflows/{doe-openfoam,dakota-openfoam}/` (the READMEs show the wiring, the file
+  contract is [references/design-parameters.md](references/design-parameters.md));
+  Kubernetes (no script_submitter, no login node) →
+  [references/k8s-workflows.md](references/k8s-workflows.md).
+- **Add a variant only where the platform changes the YAML; pick it by host.**
+  `general.yaml` serves every platform unless the workflow submits scheduler jobs:
+  `script_submitter` and its resource/scheduler/slurm/pbs form sections ship per
+  platform. A workflow that runs on the login node needs no variant
+  (`wait_for_endpoint`, `doe`, `dakota`, `design-explorer`): an HSP or NOAA caller
+  passes its top-level resource as `cluster.resource`, and a site difference a
+  hostname can decide, such as where software installs on NOAA, is runtime logic in
+  the one YAML (`dakota`). Pick the variant by platform host
+  (`pw context list`): `emed` for `cluster.einsteinmed.edu`, `noaa` for
+  `noaa.parallel.works`, `hsp` for `activate.hpc.mil`, `general` otherwise — **if
+  unclear, ask the user** — and copy the cluster/slurm/pbs form and `with:` block
+  from the matching `workflows/<name>/yamls/<variant>.yaml`.
 - **Pass every required subworkflow input, and `--dry-run` first.** `--dry-run`
   validates the YAML and each subworkflow's required inputs: omit a non-optional input
   with no default and it fails with the terse `Could not parse subworkflow` (the field
