@@ -37,10 +37,12 @@ docs and harden this skill (Step 5):
 - `pw endpoints` CLI — <https://parallelworks.com/docs/cli/pw/endpoints>
 - `pw` CLI — <https://parallelworks.com/docs/cli>
 
-**Assume the `pw` client is already authenticated** — otherwise ask the user to log
-in. Confirm context with `pw context list` if unsure. **Set `permissions: ['*']`** in
-every workflow: it is what lets the in-workflow
-`pw` client authenticate (e.g. `pw endpoints run`).
+**Assume the `pw` client on this machine is already authenticated** — otherwise ask
+the user to log in. Confirm context with `pw context list` if unsure.
+
+**Add `permissions: ['*']` only when the workflow or its subworkflows use the `pw`
+client** (`pw agent open-port` is the exception: it needs no grant). It lets the
+workflow run any `pw` command the user who launched it can run.
 
 ## Golden rules
 

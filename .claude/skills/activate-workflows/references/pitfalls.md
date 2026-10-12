@@ -71,7 +71,8 @@
   port) or the tunnel can't reach it / the port clashes.
 - **Forgot `cancel.sh` or `sleep inf`:** the service is killed immediately or the
   job exits before the endpoint registers.
-- **Missing `permissions: ['*']`:** in-workflow `pw` calls fail to authenticate.
+- **A `pw` call inside the run gets `401 Unauthorized`:** the workflow (or the parent
+  of the subworkflow making the call) lacks `permissions: ['*']`.
 - **Test the failure path on purpose:** make the start script `exit 1` before
   `pw endpoints run` and check the run ends in `error` — the success path never
   exercises the error-handling steps.
