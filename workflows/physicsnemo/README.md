@@ -86,11 +86,22 @@ GPUs: a few minutes on 8 cores.
   the job pulls it every time). `sudo docker` is used when the user is not in the
   `docker` group. The container runs as the workflow user, so everything it writes in
   the job directory is the user's, and it is named `physicsnemo-<run slug>`;
-  cancelling the run removes it.
+  cancelling the run removes it. **Docker stores images under `/var/lib`, not in the
+  install directory**: about 50 GB for this image with Docker's containerd image store
+  (the default since Docker 29, which keeps the layers and the unpacked image), 35 GB
+  with the classic one. Where `/var` is a small partition of its own (awsgpu: 15 GB) the
+  job fails at once saying so, before downloading anything; use Singularity there.
 - **Singularity / Apptainer**: for clusters without Docker. The login node builds the
   SIF from the same image once (7 minutes on a 20-core server, about 70 GB free needed in the install
-  directory while building, 13 GB afterwards); the compute nodes read it from the
-  shared filesystem. Or give the path of a SIF built elsewhere.
+  directory while building, 13 GB afterwards; 17 minutes on awsgpu); the compute nodes
+  read it from the shared filesystem. Or give the path of a SIF built elsewhere. Where
+  the kernel cannot mount the SIF (hardened images disable squashfs: awsgpu), the job
+  runs it in a user namespace instead (`--userns`), mounted with FUSE; the log says so.
+
+On a FIPS host (`/proc/sys/crypto/fips_enabled` = 1, awsgpu) the image's OpenSSL sees
+the kernel's FIPS flag, finds no FIPS provider and fails every SSL context, which breaks
+`import physicsnemo`; the job runs the container with `OPENSSL_FORCE_FIPS_MODE=0` there
+and says so. The image is not FIPS-validated either way.
 
 GPU: Docker gets `--gpus device=<n>`, Singularity `--nv`. On a scheduled job the GPU
 is the allocation's (`SLURM_JOB_GPUS` for Docker, `CUDA_VISIBLE_DEVICES` otherwise);
