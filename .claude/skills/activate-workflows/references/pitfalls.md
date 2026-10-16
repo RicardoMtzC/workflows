@@ -103,6 +103,13 @@
   it to be fixed platform-side. If a scalar input must be guarded, a ternary works
   (`"${{ x == '' ? '1h' : x }}"` — quote it: the ternary's `: ` breaks plain YAML scalars).
 
+- **An unset optional `editor` input is null to the expression layer, not `''`**
+  (verified 2026-10-16, probe runs oriented-hare, present-vulture, coherent-trout): it
+  renders empty in the shell, yet `if: ${{ inputs.x != '' }}` and the bare
+  `if: ${{ inputs.x }}` are both true when it is unset, and so is `!= ''` with
+  `default: ''` on the input. `if: ${{ inputs.x != null }}` (or `!= undefined`) is
+  false when unset and true when set: that is the test for "commands were given".
+
 ## Jobs, outputs, matrix and retries
 
 - **A matrix over a computed list fails at submission** (`Could not expand matrix
@@ -199,6 +206,30 @@
   `tutorials/optimization/general.yaml`'s Iterate step has this latent bug
   (its ~15 s test waves win the race; any real solver loses it).
 
+- **An `if: ${{ always }}` step cannot undo a step that failed before it** (verified
+  2026-10-16, probe run settling-hedgehog): after a retried step ran out of retries,
+  the `if: always` step ran and exited 0, and the job and the run still ended `error`.
+  A loop's verdict therefore has to be the status of the retried step itself (the
+  openfoam-naca restart variants' `restart.attempt`). The comment above
+  `tutorials/optimization/general.yaml`'s Report step, which counts a loop that ran out
+  of retries as success when its state says CONVERGED, does not hold.
+- **A job that `needs` a skipped job still runs; one that `needs` a failed job does
+  not** (verified 2026-10-16, probe runs rational-beetle, coherent-mongoose,
+  lucky-amoeba): with the default `if:`, `needs: [check]` ran after `check` was skipped
+  by its own `if:` and after it completed, and stayed unrun (the run in error) after
+  it failed. So an optional check job needs no special guard downstream. A job-level
+  `if: ${{ !error }}` or `${{ !error && !canceled }}` never ran in the same probes,
+  even with its needed job completed; `pw workflows runs view` hides skipped jobs, so
+  a job missing from its listing was skipped.
+- **A nested workflow's jobs run in the caller step's directory,
+  `subworkflows/<job>/step_<index>/` under the run's job directory, the same on every
+  retry** (verified again 2026-10-16): its checkout and anything it creates relative to
+  its working directory (a default case directory) persist across attempts there, so
+  a later step of the caller's job can read them by that path. The openfoam-naca
+  restart variants' `Report` step runs the attempts' copy of `restart-report.sh` from
+  `${PW_PARENT_JOB_DIR}/subworkflows/solve/step_0/` and guards against it missing
+  (no attempt got as far as the checkout). Moving the retried step changes the index.
+
 ## Resources, nodes and filesystems
 
 - **Resource passing:** bare name string in `-i` for `compute-clusters`, not a
@@ -248,6 +279,19 @@
   `--workers 2` it is 700 MB. Measure a new server's footprint on a login node (`ps -o
   rss`, or PSS from `/proc/<pid>/smaps_rollup`) before trusting the shared 512Mi/1Gi
   defaults, and probe the image in a pod with the same limits first (k8s reference §3).
+
+- **A cloud node that never finishes booting holds the job in `CONFIGURING` for the
+  whole `ResumeTimeout`, then fails it and SLURM requeues it** (verified 2026-10-16 on
+  gcptest, `ResumeTimeout = 1200 sec`: job 62 of a doe-openfoam run sat `CF` on a node
+  shown `mixed#` for 20 min, ended `NODE_FAIL`, and ran on another node after the
+  automatic requeue, `Requeue=1 Restarts=1`; the submitter's monitor followed it and the
+  run completed 20 min late). A retried attempt whose `timeout` is shorter than queue +
+  `ResumeTimeout` + walltime is cancelled before such a requeue gets to run
+  (`workflows/openfoam-naca/yamls/general-restart.yaml`, `restart.attempt_timeout`).
+- **The test runner counts every queued job of the user after a scheduled test**
+  (`squeue -h -u $USER`), not only the test's own: an interactive `srun bash` running
+  meanwhile makes the row read `cleanup=leftover:squeue` (2026-10-16). Check with
+  `sacct` that every job named `inline.<slug>-…` completed before reading it as a leak.
 
 ## `script_submitter` and scheduler jobs
 
@@ -319,6 +363,25 @@
   cleanup script stays the belt and braces (and on `hsp` it cannot reach the node: that
   submitter writes `HOSTNAME` after the script). `activate-batch`'s `commands.exit` has
   the same latent `0`; harmless there because a cancelled run never reads it.
+- **SLURM's walltime SIGTERM reaches the batch script alone, not its children** (verified
+  2026-10-16 on gcptest with a 1-minute job: the script's `trap` fired at the limit, a
+  `sleep` it had started lived on until the SIGKILL 30 s later, `KillWait`, and the
+  batch step ended `CANCELLED` after 1:29). A solver started by the script therefore
+  runs on, unrecorded, until the SIGKILL, mid-write or not. Forward the signal down:
+  the batch script runs the real script in the background with a `trap` that forwards
+  TERM/INT/HUP to it, and that script forwards to the solver's process tree (walk
+  `pgrep -P` recursively: `mpirun` → proxies → ranks) and records the interruption
+  (`workflows/openfoam-naca/app/create-case.sh`'s `case.sh`, `app/restart.sh`). bash runs a
+  trap at once only while it waits on a *background* job (`wait $!`); a foreground
+  command defers it until the command ends, so run every long tool in the background.
+  The platform's cancel of a retried attempt goes through the submitter's cleanup
+  (`scancel`, or `kill -- -<pgid>` on the login node) and arrives the same way. Both
+  paths recorded end to end (2026-10-16): under a 2-minute walltime the SLURM job ended
+  `TIMEOUT` at 2:00 and the simulator logged `interrupted (SIGTERM) in simpleFoam` with
+  its checkpoints (run sweet-bass); under a 75 s attempt budget on the login node the
+  cancel arrived the same way and the runner's leftover check found nothing (run
+  smashing-guppy, where the budget also cut an attempt *after* it had solved, and the
+  next attempt only extracted the results again).
 
 ## Endpoints and the service
 
@@ -528,6 +591,13 @@
   `unrecognized arguments` and the liveness check failed the run (2026-10-08,
   `workflows/dakota-openfoam`, run vocal-magpie). Build the argument before the heredoc
   with `printf -v arg -- '--link %q' "Pareto front=${url}"` and write `${arg}`.
+
+- **bash 5.1 reads a bare `case` inside `$( )` as the keyword** and fails the whole script
+  at parse time with `unexpected EOF while looking for matching` (gcptest, bash 5.1.8,
+  2026-10-16: `echo "$(list_times case)"` broke a test driver; `case/log.x` as a path is
+  fine, the bare word is not). Write `./case` or `case/`. A function named like a
+  builtin (`times`) has the same effect inside `$( )`. macOS bash 3.2 accepts both, so
+  `bash -n` locally proves nothing: run it on the target.
 
 ## Software, sites and figures
 

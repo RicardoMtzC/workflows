@@ -49,7 +49,8 @@ submitter runs the start script in its own directory").
 A batch workflow that solves one design from a params file (`openfoam-naca`) is also
 a building block: it lists its design parameters in `app/design-parameters.txt`,
 checks the params file with `tools/utils/check-params.sh` before submitting, writes
-`results.out` atomically and always writes `exit_code`. The contract, and how a
+`results.out` atomically and writes `exit_code` when the case ran to its end (a killed
+case leaves neither, which a driver reads as "re-propose"). The contract, and how a
 driver feeds it: [../design-parameters.md](../design-parameters.md) and
 [composed.md](composed.md).
 
@@ -66,6 +67,23 @@ driver feeds it: [../design-parameters.md](../design-parameters.md) and
   exists, so the check step's annotation is what a caller or a CI gate sees.
 - Cloud-burst nodes take minutes to boot (`idle~ → CF → RUNNING`); the login-node
   mode (`scheduler: false`) is the fast check, the scheduler mode the real one.
+
+## A resumable batch job
+
+A batch job that outlasts its walltime, or runs on nodes that can be preempted, is
+made resumable rather than given a longer walltime: `workflows/openfoam-naca`'s
+`yamls/general-restart.yaml` (and `hsp-restart`, `noaa-restart`), whose README section
+"Resubmitting an interrupted case" walks through the pieces. The solver writes checkpoints (at least two kept, a torn one
+discarded); the run script resumes only a case built from the same inputs, skips the
+stages done, restarts the solver from the latest complete checkpoint, never solves a
+solved case again, records a solver that failed on its own as final, and logs every
+attempt (`app/restart.sh`); the batch script forwards the scheduler's SIGTERM down to
+the solver (pitfalls, "SLURM's walltime SIGTERM"); a loop variant calls the whole case
+workflow from a retried step, and a hidden input (`restart.attempt`) makes the case
+workflow's results step complete on a final failure and fail on an interruption, so
+the retry stops on the one and resumes the other ([composed.md](composed.md)); a
+trailing `if: ${{ always }}` step tells solved, failed on its own and out of attempts
+apart. The case workflow itself stays a plain batch job with resume off.
 
 ## A batch job beside a page
 

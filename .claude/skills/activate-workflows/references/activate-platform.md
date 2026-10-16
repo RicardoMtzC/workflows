@@ -351,8 +351,11 @@ A step can declare a `retry` block; it re-runs the step while it exits **non-zer
     ssh "${TARGET_IP}" nvidia-smi   # exit code drives the retry
 ```
 - **`exit <code>` drives it:** zero = success (stop), non-zero = retry. A step that
-  exhausts its retries ends the run as **error** — pair it with a later
-  `if: ${{ always }}` step to report a clean result.
+  exhausts its retries ends the run as **error**, and a later `if: ${{ always }}`
+  step that exits 0 does not change that (verified 2026-10-16, probe run
+  settling-hedgehog: the step failed after its retries, the `if: always` step ran and
+  exited 0, the job and the run ended `error`). Use that step to report what happened,
+  never to turn the run green.
 - **Per-attempt env vars:** `PW_WORKFLOW_STEP_CURRENT_RETRY` (0 on the first try) and
   `PW_WORKFLOW_STEP_MAX_RETRIES` are exported each attempt. `index % N` over a list turns
   the retry counter into a **round-robin selector** (fail over to the next resource).
@@ -383,6 +386,17 @@ A step can declare a `retry` block; it re-runs the step while it exits **non-zer
   retry-as-loop + guarded static matrix + results-file protocol, tested end-to-end
   (run dear-crow, 2026-09-28) — is `tutorials/optimization/` (staged README);
   `retry.max-retries: ${{ inputs.<group>.<n> }}` from a form input also verified there.
+- **`ignore-errors: true` works on a `uses:` step** (verified 2026-10-16, run finer-bunny:
+  a subworkflow ending in error, the next step ran, the job and the run completed). It is
+  one way to give a retried call a verdict of its own when the callee cannot be
+  changed: a thin attempt workflow calls it with `ignore-errors`, then a step reads the
+  files it left and exits 0 (over) or 1 (retry). When the callee is yours, a hidden
+  input is simpler and saves the nesting level: `openfoam-naca`'s `restart.attempt`
+  makes its results step exit 0 on a case that failed on its own (final) and 1 on an
+  interrupted one, so `yamls/general-restart.yaml` retries `general.yaml` directly. A retried
+  step that fails is retried whatever a later `if: always` step in the same job
+  returns, so the verdict must be the status of the first failing step, not of a step
+  after it.
 - **`max-retries` can be computed:** `max-retries: ${{ needs.<job>.outputs.N - 1 }}` —
   arithmetic is evaluated in the expression layer. An upstream step writing `N` to
   `$OUTPUTS` lets a later step in the **same job** size its own retries
@@ -408,6 +422,13 @@ platform host):
 | `activate.hpc.mil` | `hsp` |
 | anything else | `general` |
 | unclear | **ask the user** |
+
+Write what the variants share once, so the YAMLs differ only where the platform
+does and a change lands once. A step body only this workflow runs goes into one
+script under `app/`: a one-line step calls it with its inputs as environment
+variables, `OUTPUTS` included (`workflows/openfoam-naca/app/read-results.sh`). Logic
+many workflows call, or that takes several steps or jobs, is a subworkflow they call
+(`workflows/wait_for_endpoint`, `workflows/script_submitter`; §3).
 
 The same choice applies to **`script_submitter`** (§5) and to the **resource form
 section** of your YAML: the `resource`, `scheduler`, `slurm`, and `pbs` input groups and
@@ -672,6 +693,7 @@ to your task.
 | **Fan-out / sweep over N workers** (matrix strategy) | `tutorials/endpoint-workflows/05-matrix.yaml` |
 | **Step `retry`, attempt-aware vars, `list` inputs, computed `max-retries`, failover** | `tutorials/endpoint-workflows/{06-first-start-wins,07-failover}.yaml` |
 | **Iterative loop over computed cases** (retry-as-loop + guarded static matrix) | `tutorials/optimization/` |
+| **Resubmit an interrupted simulation until it completes** (a walltime, a preempted or lost node, a cancel: checkpoints, a run script that resumes, the signal forwarded, retry-as-loop whose callee tells a final failure from an interruption) | `workflows/openfoam-naca/yamls/general-restart.yaml` (+ `hsp-restart`, `noaa-restart`; the README's "Resubmitting an interrupted case" is the walkthrough; the resume logic in `app/restart.sh`) |
 | **`if:` status keywords on steps and jobs** (`always`, `error`, `canceled`, `!completed`) | `tutorials/if-conditions/` |
 | **Compose standalone workflows** (sampler or optimizer → matrix of evaluators → a live page; files as the only coupling) | `workflows/doe-openfoam/`, `workflows/dakota-openfoam/` (READMEs show the wiring); the file contract in [design-parameters.md](design-parameters.md) |
 | **A workflow others can call** (form as the interface, paths as inputs, one `general.yaml` for every platform) | `workflows/doe/`, `workflows/design-explorer/`, `workflows/wait_for_endpoint/` |

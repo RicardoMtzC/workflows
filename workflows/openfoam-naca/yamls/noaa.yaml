@@ -29,6 +29,19 @@
 # load commands or, when none are given, from the official binaries the app's
 # installer downloads once; a case whose images fail to render is still a solved
 # case (the coefficients are on disk first).
+#
+# Checkpoints and resuming (the restart group): the solver can write its fields
+# every N iterations and, with resume on, a case found in the case directory
+# that was built from the same design and settings is continued instead of
+# started over: the mesh, the decomposition and the potentialFoam initialization
+# are kept once done, simpleFoam restarts from its latest complete checkpoint,
+# and a solved case, or one whose solver failed on its own, is not solved again.
+# Every attempt is one line of <case directory>/attempts.log (app/restart.sh).
+# The group is hidden: noaa-restart.yaml sets it when it calls this YAML from a
+# retried step until the case completes, with restart.attempt on, which makes a
+# case that failed on its own complete the run (final, so the loop stops) instead
+# of failing it (interrupted, so the loop resumes it); a caller's with: block can
+# set it too.
 permissions:
   - '*'
 
@@ -45,109 +58,31 @@ jobs:
           sparse_checkout:
             - workflows/openfoam-naca/app
             - tools/utils
-      # the environment is one file every later step and the case source; the heredoc
-      # carries the form's load commands verbatim (empty -> conda-forge install).
-      # The same for ParaView when images are wanted (empty -> the official binaries)
+      # the environment is one file every later step and the case source
+      # (app/prepare-environments.sh); the quoted heredocs carry the form's load
+      # commands verbatim (empty -> the installers)
       - name: Prepare the OpenFOAM and ParaView Environments
         run: |
-          set -e
-          cores="${{ inputs.cluster.cores_per_case }}"
-          if ! [[ "${cores}" =~ ^[0-9]+$ ]] || [ "${cores}" -lt 1 ]; then
-            echo "::error::cores_per_case must be a positive integer, got '${cores}'"
-            exit 1
-          fi
-          required="blockMesh potentialFoam simpleFoam"
-          if [ "${cores}" -gt 1 ]; then
-            required="${required} decomposePar reconstructPar mpirun"
-          fi
-          # NOAA home directories are small: when no environment commands are
-          # given, the conda-forge install goes to the cluster's shared software
-          # tree if this account can write there. Probe by creating the directory
-          # rather than reading mode bits: the trees are group- or ACL-writable and
-          # list as root-owned. Only the installer reads this; the environment file
-          # it writes records the absolute prefix.
-          case "${{ inputs.resource.ip }}" in
-            hfe[0-9]*.fairmont.rdhpcs.noaa.gov) shared=/contrib/pw ;;          # Hera
-            mfe[0-9]*.fairmont.rdhpcs.noaa.gov) shared=/contrib/pw ;;          # Mercury
-            ufe[0-9]*.fairmont.rdhpcs.noaa.gov) shared=/contrib/pw ;;          # Ursa
-            gaea[0-9]*.ncrc.gov) shared=/usw/rdhpcs/software/pw ;;             # Gaea
-            *) shared="" ;;                                                    # PPAN, cloud clusters
-          esac
-          if [ -n "${shared}" ] && mkdir -p "${shared}/openfoam-naca" 2>/dev/null; then
-            export service_parent_install_dir="${shared}"
-            echo "::notice::installing under the shared software directory ${shared}"
-          fi
-          bash tools/utils/prepare-env.sh openfoam "${PWD}/openfoam-env.sh" \
-            workflows/openfoam-naca/app/install-openfoam.sh ${required} << 'PW_LOAD_EOF'
+          cat > openfoam-load.sh << 'PW_LOAD_EOF'
           ${{ inputs.software.openfoam_load }}
           PW_LOAD_EOF
-          if [ "${{ inputs.postprocessing.generate_images }}" = "true" ]; then
-            bash tools/utils/prepare-env.sh paraview "${PWD}/paraview-env.sh" \
-              workflows/openfoam-naca/app/install-paraview.sh pvpython << 'PW_LOAD_EOF'
+          cat > paraview-load.sh << 'PW_LOAD_EOF'
           ${{ inputs.software.paraview_load }}
           PW_LOAD_EOF
-          fi
+          CORES_PER_CASE="${{ inputs.cluster.cores_per_case }}" GENERATE_IMAGES="${{ inputs.postprocessing.generate_images }}" \
+            RESOURCE_IP="${{ inputs.resource.ip }}" \
+            bash workflows/openfoam-naca/app/prepare-environments.sh openfoam-load.sh paraview-load.sh
       # the case directory gets the design (params.in) and the script the submitter
-      # runs there; a stale verdict from an earlier run of the same directory is
-      # removed so a missing results.out always means this run's solver failed
+      # runs there (app/create-case.sh, one script shared by every variant)
       - name: Create the Case
         run: |
-          set -e
-          case_dir="${{ inputs.case.case_dir }}"
-          case "${case_dir}" in
-            ''|undefined) case_dir="${PWD}/case" ;;
-          esac
-          mkdir -p "${case_dir}"
-          params_file="${{ inputs.case.params_file }}"
-          case "${params_file}" in
-            ''|undefined) params_file="" ;;
-            *)
-              if [ ! -f "${params_file}" ]; then
-                echo "::error::params_file ${params_file} does not exist"
-                exit 1
-              fi
-              ;;
-          esac
-          # the file may only name this runner's design parameters, the ones
-          # app/design-parameters.txt publishes: a misspelled name would
-          # otherwise be dropped silently and the case solved with the form's value
-          if [ -n "${params_file}" ]; then
-            bash tools/utils/check-params.sh workflows/openfoam-naca/app/design-parameters.txt "${params_file}"
-          fi
-          # the file's lines win over the form's values of the same name, and the
-          # form fills in whatever the file does not list (first occurrence wins)
-          {
-            if [ -n "${params_file}" ]; then
-              cat "${params_file}"
-              echo
-            fi
-            printf '%s max_camber\n%s camber_position\n%s thickness\n%s angle_of_attack\n' \
-              "${{ inputs.case.max_camber }}" "${{ inputs.case.camber_position }}" \
-              "${{ inputs.case.thickness }}" "${{ inputs.case.angle_of_attack }}"
-          } | awk 'NF >= 2 && !seen[$2]++' > "${case_dir}/params.in.tmp"
-          mv "${case_dir}/params.in.tmp" "${case_dir}/params.in"
-          rm -f "${case_dir}/results.out" "${case_dir}/exit_code"
-          # the submitter inlines the script body, so the absolute paths are baked in;
-          # it is not named run.sh because the submitter writes its assembled job
-          # script under that name in the same directory. The exit_code file is the
-          # evidence that the case ran (and how it ended) when no results.out came back.
-          cat > "${case_dir}/case.sh" << PW_CASE_EOF
-          #!/bin/bash
-          cd "${case_dir}"
-          MESH_SCALE="${{ inputs.case.mesh_scale }}" CORES_PER_CASE="${{ inputs.cluster.cores_per_case }}" \\
-            OPENFOAM_ENV="${PWD}/openfoam-env.sh" \\
-            bash "${PWD}/workflows/openfoam-naca/app/simulator.sh"
-          rc=\$?
-          echo "\${rc}" > exit_code
-          if [ "\${rc}" -eq 0 ] && [ "${{ inputs.postprocessing.generate_images }}" = "true" ]; then
-            PARAVIEW_ENV="${PWD}/paraview-env.sh" \\
-              bash "${PWD}/workflows/openfoam-naca/app/render-images.sh" case images params.in results.out
-          fi
-          exit "\${rc}"
-          PW_CASE_EOF
-          echo "--- ${case_dir}/params.in"
-          cat "${case_dir}/params.in"
-          echo "CASE_DIR=${case_dir}" | tee -a $OUTPUTS
+          CASE_DIR="${{ inputs.case.case_dir }}" PARAMS_FILE="${{ inputs.case.params_file }}" \
+            MAX_CAMBER="${{ inputs.case.max_camber }}" CAMBER_POSITION="${{ inputs.case.camber_position }}" \
+            THICKNESS="${{ inputs.case.thickness }}" ANGLE_OF_ATTACK="${{ inputs.case.angle_of_attack }}" \
+            MESH_SCALE="${{ inputs.case.mesh_scale }}" CORES_PER_CASE="${{ inputs.cluster.cores_per_case }}" \
+            RESUME="${{ inputs.restart.resume }}" CHECKPOINT_EVERY="${{ inputs.restart.checkpoint_every }}" \
+            KEEP_CHECKPOINTS="${{ inputs.restart.keep_checkpoints }}" GENERATE_IMAGES="${{ inputs.postprocessing.generate_images }}" \
+            OUTPUTS="${OUTPUTS}" bash workflows/openfoam-naca/app/create-case.sh
 
   run_case:
     needs: [preprocessing]
@@ -194,7 +129,8 @@ jobs:
               ${{ inputs.cluster.pbs.scheduler_directives }}
 
   # the submitter never forwards the script's exit status, so the verdict comes
-  # from the files the case left behind: results.out (the objectives) or none
+  # from the files the case left behind: results.out (the objectives) or none.
+  # The step is one script shared by every variant (app/read-results.sh)
   results:
     needs: [preprocessing, run_case]
     ssh:
@@ -202,33 +138,9 @@ jobs:
     steps:
       - name: Read the Coefficients
         run: |
-          case_dir="${{ needs.preprocessing.outputs.CASE_DIR }}"
-          if [ ! -f "${case_dir}/results.out" ]; then
-            rc=$(cat "${case_dir}/exit_code" 2>/dev/null || echo "none: the case never ran")
-            echo "::error::no results.out in ${case_dir} (simulator exit code: ${rc}); log tails follow"
-            tail -n 20 "${case_dir}"/case/log.* 2>/dev/null
-            tail -n 30 "${case_dir}"/run.*.out 2>/dev/null
-            exit 1
-          fi
-          cd_=$(awk '$2 == "drag_coefficient" {print $1}' "${case_dir}/results.out")
-          cl=$(awk '$2 == "neg_lift_coefficient" {printf "%.10f", -$1}' "${case_dir}/results.out")
-          echo "DRAG_COEFFICIENT=${cd_}" | tee -a $OUTPUTS
-          echo "LIFT_COEFFICIENT=${cl}" | tee -a $OUTPUTS
-          echo "RESULTS_FILE=${case_dir}/results.out" | tee -a $OUTPUTS
-          echo "PARAVIEW_FILE=${case_dir}/case/case.foam" | tee -a $OUTPUTS
-          # the images are a courtesy of a solved case: missing ones are a warning
-          # with the renderer's log, never a failed case
-          if [ "${{ inputs.postprocessing.generate_images }}" = "true" ]; then
-            n=$(ls "${case_dir}"/images/*.png 2>/dev/null | wc -l)
-            if [ "${n}" -gt 0 ]; then
-              echo "IMAGES_DIR=${case_dir}/images" | tee -a $OUTPUTS
-              echo "::notice::${n} images of the fields in ${case_dir}/images: $(cd "${case_dir}/images" && ls *.png | tr '\n' ' ')"
-            else
-              echo "::warning::no images were rendered for the solved case; the renderer's log follows (${case_dir}/images/render.log)"
-              tail -n 20 "${case_dir}/images/render.log" 2>/dev/null
-            fi
-          fi
-          echo "::notice::Cd = ${cd_}, Cl = ${cl} for the design in ${case_dir}/params.in (mesh_scale ${{ inputs.case.mesh_scale }}); open ${case_dir}/case/case.foam in ParaView to see the fields"
+          OUTPUTS="${OUTPUTS}" GENERATE_IMAGES="${{ inputs.postprocessing.generate_images }}" \
+            MESH_SCALE="${{ inputs.case.mesh_scale }}" RESTART_ATTEMPT="${{ inputs.restart.attempt }}" \
+            bash workflows/openfoam-naca/app/read-results.sh "${{ needs.preprocessing.outputs.CASE_DIR }}"
 
 'on':
   execute:
@@ -418,6 +330,53 @@ jobs:
               the commands in Software Environment or, left empty, from the
               official binaries the workflow downloads once (no sudo, ~830 MB).
               A case whose images fail to render still reports its coefficients.
+      restart:
+        type: group
+        label: Checkpoints and Resume (hidden; set by noaa-restart.yaml and by callers)
+        hidden: true
+        items:
+          checkpoint_every:
+            type: number
+            label: Write the fields every N iterations
+            default: 0
+            min: 0
+            tooltip: |
+              0 writes only the last iteration. N > 0 also writes every N
+              iterations: the checkpoints a resumed case restarts from, and
+              intermediate fields to look at in ParaView. The last Checkpoints
+              kept of them stay on disk (purgeWrite).
+          keep_checkpoints:
+            type: number
+            label: Checkpoints kept
+            default: 2
+            min: 1
+            tooltip: |
+              How many written iterations stay on disk; older ones are removed as
+              new ones are written. Keep at least two to resume: a checkpoint a
+              kill cut short is incomplete and discarded, and the solver restarts
+              from the one before it.
+          resume:
+            type: boolean
+            label: Resume the case in the case directory?
+            default: false
+            tooltip: |
+              No  → case/ under the case directory is removed and the case solved
+                    from scratch.
+              Yes → a case/ built from the same design and settings (listed in
+                    case/restart/inputs) is continued: the mesh, the decomposition
+                    and the potentialFoam initialization are kept once done,
+                    simpleFoam restarts from its latest complete checkpoint, a
+                    solved case is not solved again and neither is one whose
+                    solver failed on its own (diverged). A case built from other
+                    inputs starts from scratch. Every attempt is one line of
+                    <case directory>/attempts.log. This is what
+                    noaa-restart.yaml relies on to resubmit a case until it
+                    completes.
+          attempt:
+            type: boolean
+            hidden: true
+            default: false
+            label: One attempt of a resubmission loop? Yes only from noaa-restart.yaml's retried step, where a case that failed on its own completes the run so the loop stops
       software:
         type: group
         label: Software Environment

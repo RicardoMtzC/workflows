@@ -104,7 +104,7 @@ or tunnel logic; write a new workflow so it can be called in turn.
 | **Endpoint service** (most workflows) | the service answers its URL; it outlives the run until `pw endpoints delete` | `session_runner` (`script_submitter`) + `wait_for_endpoint` | `webshell` (smallest), `jupyterlab`, `streamlit` (Singularity), `ollama` | `shapes/endpoint.md` |
 | **Batch job** | the script finishes; the run fails when it fails | `script_submitter` once, then a step that reads the exit file the script wrote | `activate-batch` (smallest), `benchmarks`, `3dcs`, `cwl-mpi-hello-world`, `openfoam-naca`, `probe`'s `general_run_tests.yaml` | `shapes/batch.md` |
 | **Callable step** (login node only) | its steps finish; one `general.yaml` for every platform | plain `run:` steps; a detached `pw endpoints run` with a `!completed` handler when it serves a page | `doe`, `dakota`, `design-explorer`, `wait_for_endpoint` | `shapes/composed.md` |
-| **Composed** | the study or loop finishes | `uses:` of the rows above: a matrix of evaluators, retry-as-loop, a live page | `doe-openfoam`, `dakota-openfoam` | `shapes/composed.md` |
+| **Composed** | the study or loop finishes | `uses:` of the rows above: a matrix of evaluators, retry-as-loop, a live page | `doe-openfoam`, `dakota-openfoam`, `openfoam-naca`'s `*-restart.yaml` | `shapes/composed.md` |
 | **Kubernetes** | never: cancelling the run is the teardown | the sidecar pod jobs; no submitter, nothing checked out | `mlflow/yamls/k8s.yaml` (k8s-only), `openvscode/yamls/general_k8s.yaml` (hybrid) | `references/k8s-workflows.md` |
 
 The rows combine: a **service plus the work that uses it** (`burst-render-demo`,
@@ -165,6 +165,15 @@ the same invariants:
   with `tools/utils/check-params.sh` before solving; drivers and callers (`doe`, `dakota`,
   `doe-openfoam`, `dakota-openfoam`) only write `params.in` with those names. The contract:
   `.claude/skills/activate-workflows/references/design-parameters.md`.
+- A batch job that outlasts its walltime or runs on preemptible nodes is made
+  **resumable**, not given a longer walltime: the solver writes checkpoints (two kept,
+  a torn one discarded), the run script resumes only a matching case, skips the stages
+  done, never solves a solved or self-failed case again and logs every attempt, the
+  batch script forwards the scheduler's SIGTERM (which reaches it alone) down to the
+  solver, and a loop variant calls the whole case workflow from a retried step with a
+  hidden input that makes a final failure complete the sub-run, so the retry stops on
+  it and resumes only interruptions (`openfoam-naca/yamls/general-restart.yaml`;
+  `shapes/batch.md`, "A resumable batch job").
 
 ### Callable step and composed workflow
 
@@ -248,6 +257,12 @@ To convert an older session-tunnel workflow to the endpoint shape, follow
   paths. Support both SLURM and PBS (`scheduler: true` submits; `false` runs on the
   login node). Copy the `cluster` form and the submitter's `with:` block from the same
   variant of a sibling workflow; `--dry-run` does not catch a mismatch.
+- **Code that several variants share is written once**, so a change lands once and
+  the variants differ only where the platform does. A step body only this workflow
+  runs lives in a script under `app/`, called from a one-line step with its inputs as
+  environment variables (`openfoam-naca`'s `read-results.sh`, `OUTPUTS` passed
+  through). Logic many workflows call, or that takes several steps or jobs, is a
+  subworkflow they call (`wait_for_endpoint`, `script_submitter`).
 - Multi-implementation workflows select their script subdir via a runtime input
   (`container_runtime`, `service.container_runtime`, `service.name`): the input
   **values must match the impl subdirectory names** under `workflows/<name>/`.
