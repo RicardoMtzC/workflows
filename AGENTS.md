@@ -1,4 +1,4 @@
-# CLAUDE.md — Parallel Works Workflows Repository
+# AGENTS.md — Parallel Works Workflows Repository
 
 ## Project Overview
 
