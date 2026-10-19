@@ -505,8 +505,21 @@
   is wired. For a distributed piece (e.g. cross-node `pw ssh` calls), stage the
   script on the target node and exercise it directly, then wrap it in YAML.
 
+- **A page on the vendored theme shows one mode only, or none, without `color-scheme`**
+  (verified 2026-10-19, PROBE): `theme.css` pairs each token's modes with `light-dark()`,
+  which follows the root's `color-scheme` (`light dark`: the device; `light` or `dark`:
+  pinned). Set it from one attribute the page writes before its first paint; never
+  redefine the tokens per mode ([app-ui.md](app-ui.md)).
+
 ## `pw` CLI, auth and remote shells
 
+- **A credential passed as an input is checked at the first `pw` call that uses it, not
+  by the form** (verified 2026-10-19, PROBE run `wealthy-rattler`): an expired key reaches
+  `pw endpoints run` and the service dies with `[ERROR] Unauthorized` in `run.*.out`,
+  while the step log only says `pw endpoints run failed`. The CLI's own token in
+  `~/.config/pw/credentials` expires hourly and is refreshed only by a `pw` command: run
+  one before reading it, or pass a real API key; a `pw auth whoami` before
+  `pw endpoints run` fails the run with the reason.
 - **A `pw` call inside the run gets `401 Unauthorized`:** the workflow (or the parent
   of the subworkflow making the call) lacks `permissions: ['*']`.
 - **`pw workflows run` with a relative YAML path:** CLIs before v7.105 parsed it as a git
@@ -587,6 +600,14 @@
   serves longer than the wait turns into a false `leftover:proc:pw endpoints run`. Run the
   tests of one resource sequentially (one `run-workflow-test.py` invocation takes several
   test files and runs them in order).
+
+- **Every PROBE test of a workflow failing at launch with `Missing required fields:
+  Service host` (`#/resource`) is a definition whose `inputs` no longer match the form**
+  (verified 2026-10-19: 26 definitions still passed `cluster.resource` after the forms took
+  the cluster as the top-level `resource` on 2026-10-12; PROBE accepts both, so nothing
+  warns). Regenerate them with `workflows/probe/scripts/import_workflow_tests.py` and
+  dry-run each against its YAML: a stopped cluster validates with the right shape, so the
+  dry-run tells the two apart.
 
 ## Shell scripting
 
