@@ -863,6 +863,13 @@ all verified on live runs:
   stops `wait_for_endpoint`. Both vars reach scheduled
   compute nodes via the `inputs.sh` `env | grep '^PW_'` capture.
 
+### Signing users in with ACTIVATE (OIDC)
+
+An app that lets visitors sign in with their ACTIVATE account registers an application
+for its exact URL and needs a proxy of its own in front; the recipe, the claims, the
+session proxy's constraints and how to test the flow are in
+[oidc-sign-in.md](oidc-sign-in.md) (`workflows/openproject` is the worked example).
+
 ### Apps that need a base path (path-based endpoints)
 
 Subdomain endpoints serve at the URL root, so most apps need no base-URL config and no

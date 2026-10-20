@@ -417,8 +417,12 @@
 
 ## Endpoints and the service
 
-- **Service must bind `0.0.0.0` on the port `pw endpoints run` assigned** (`{port}` /
-  `$PORT`; not `127.0.0.1`, not a fixed port) or the tunnel can't reach it / the port clashes.
+- **The service listens on the port `pw endpoints run` assigned** (`{port}` / `$PORT`,
+  never a fixed port of its own, or the tunnel forwards to nothing and ports clash).
+  The tunnel client runs on the service's node, so the loopback is enough:
+  `openproject`, `pydio-cells` and `pgadmin4` publish on `127.0.0.1:${PORT}` (verified on
+  login and compute nodes). `0.0.0.0` only matters when another node must reach the
+  service directly.
 - **The start script returned early, or a teardown left a process:** `pw endpoints run`
   stays in the foreground (it blocks for the service's life; a server started in the
   background needs a `wait` or `sleep inf` after it), or the submitter sees the script end
@@ -452,6 +456,52 @@
   the resource namespace, cluster and `PW_USER`), keep `--name <service>-${PW_RUN_SLUG}` for lookup,
   and check `pw endpoints list` for an endpoint already serving `https://<label>.`
   before launching (see `workflows/openvscode/app/start-template.sh`).
+- **The endpoint proxy forwards `X-Forwarded-Proto: http`** (verified 2026-10-20 with a
+  header-echo server): an app in HTTPS mode redirects every page to itself, never writes
+  its Secure cookie and fails its CSRF origin check ("The OpenProject cookie is missing"),
+  while an exempt health route still answers 200. Set the header in a proxy of your own
+  and probe a real page: [oidc-sign-in.md](oidc-sign-in.md).
+- **PID files in a shared run directory let a refused run kill the live one** (verified
+  2026-10-20, `workflows/openproject`): a second run on the same run directory lost the
+  lock and exited, and the start script's cleanup trap then ran `cancel.sh`, which
+  read the PID files the live run had written there and stopped its services (the
+  endpoint went `stopped`). Keep PID files in the run's own job directory (`${PWD}/run`
+  of the start script) so a cleanup can only reach what that run started; the lock
+  stays in the run directory.
+- **Killing a `singularity exec` starter does not reliably stop the process inside**
+  (verified 2026-10-20, `workflows/openproject` Singularity launcher): a TERM to the
+  starter PID of `good_job start` ended the starter and left the worker running, while
+  puma, nginx and PostgreSQL stopped fine. For services a `cancel.sh` must stop, start
+  each one as the leader of its own process group (`setsid nohup singularity exec … &`,
+  `$!` is then the PGID) and signal the group (`kill -TERM -- -$pgid`, `kill -0 -- -$pgid`
+  to see whether anything is left, `-KILL` after a grace period). `nohup` cannot run a
+  shell function either: build the common `singularity exec` options as an array and
+  pass plain commands.
+- **Passing secrets and values with spaces into Apptainer** (verified 2026-10-20,
+  apptainer 1.4.5, `workflows/openproject`): `--env-file` is evaluated like a shell
+  script, so `KEY=openid profile email` aborts every container start (`FATAL: while
+  setting environment`) and `$` in a password is expanded; quoting the file does not
+  survive either (`'\''` came out as `\'`). `--env KEY=VALUE` is literal but lands in
+  the process list. `APPTAINERENV_KEY`/`SINGULARITYENV_KEY` host variables reach the
+  container even with `--cleanenv` and stay out of `ps`, but `$…`, backticks and
+  backslashes are still expanded in them: escape those three (`sed 's/[\\$`]/\\&/g'`)
+  and the value arrives verbatim, double quotes included.
+- **The session proxy rewrites every redirect to another host onto the session's own
+  host** (verified 2026-10-20): an OIDC/OAuth sign-in or RP-initiated logout never reaches
+  the identity provider. Intercept external 3xx in your own proxy and answer a hop page:
+  [oidc-sign-in.md](oidc-sign-in.md).
+- **A hidden, ignored input is still validated as required at launch** (verified
+  2026-10-20, `workflows/openproject`): a `password` field with `hidden: ${{ inputs.x == '' }}`
+  and `ignore: ${{ .hidden }}` but no `optional: true` failed every launch without it
+  (`Missing required fields: Client secret`, HTTP 400), also from the CLI, and
+  `optional` takes no expression: `optional: ${{ .hidden }}` and
+  `optional: ${{ inputs.x == '' }}` both left the field required. A field that only
+  matters with another one stays `optional: true` (or gets a default), and the
+  controller enforces the pairing with a clear `::error`.
+- **An app that signs users in with ACTIVATE (OIDC)** (verified 2026-10-20,
+  `workflows/openproject`) needs an app registered for its exact URL, a pinned subdomain
+  and a proxy of its own in front; the recipe, the claims and how far curl can test the
+  flow are in [oidc-sign-in.md](oidc-sign-in.md).
 - **`pw agent open-port` is a TOCTOU trap for slow-starting services:** the port
   sits unbound while the service boots (a SIF conversion takes ~1 min), and busy
   siblings on the node (MATLAB's dynamic services) steal it from the ephemeral

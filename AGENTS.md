@@ -151,6 +151,10 @@ the same invariants:
   to be freed in preprocessing before the wait job looks it up, or the wait finds the
   previous instance answering (`hpc_status`'s `controller.sh`); `app-testbed` reuses
   the running instance on purpose unless **Restart server** is on.
+- An app that **signs users in with ACTIVATE** (OIDC) is registered once for its exact
+  URL, so it pins its subdomain, and needs a proxy of its own in front to undo what the
+  session proxy does to the sign-in. The recipe:
+  `.claude/skills/activate-workflows/references/oidc-sign-in.md` (`workflows/openproject`).
 - A service that only ever runs on the login node (`design-explorer`, TensorBoard in
   `physicsnemo`) starts `pw endpoints run` detached from a plain step
   (`tutorials/endpoint-workflows` Stage 3) with a `stop_server_if_unhealthy` job under
@@ -210,8 +214,9 @@ To convert an older session-tunnel workflow to the endpoint shape, follow
   `PW_API_KEY` stays out of `inputs.sh`; a script that needs it reads the runtime env.
 - `controller.sh` runs on the login node (internet access) before anything is
   submitted; the submitted script may run on a compute node without it.
-- A **service** binds `0.0.0.0` on the port `pw endpoints run` assigned (the `{port}`
-  token or `$PORT`; `--port N` when a client must know it), stays in the foreground for
+- A **service** listens on the port `pw endpoints run` assigned (the `{port}` token or
+  `$PORT`; `--port N` when a client must know it; the loopback is enough, the tunnel
+  client runs on the same node), stays in the foreground for
   the service's life (`pw endpoints run` blocks; a server started in the background
   needs a `wait` or `sleep inf` after it), and exits non-zero when the endpoint never
   registered (copy the tail of `workflows/webshell/app/start-template.sh`). A check
